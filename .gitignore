@@ -1,0 +1,4 @@
+﻿build/
+data.wal
+.DS_Store
+.vscode/
