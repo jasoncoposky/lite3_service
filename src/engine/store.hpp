@@ -67,58 +67,74 @@ public:
     wal_ = std::make_unique<WriteAheadLog>(wal_path);
     for (size_t i = 0; i < SHARDS; ++i)
       shards_.push_back(std::make_unique<Shard>());
+
+    // Recover from WAL
+    wal_->recover(
+        [this](WalOp op, std::string_view key, std::string_view payload) {
+          if (op == WalOp::PUT) {
+            apply_put(std::string(key), payload);
+          } else if (op == WalOp::PATCH_I64) {
+            // payload format: "field:val"
+            std::string p(payload);
+            size_t colon = p.find(':');
+            if (colon != std::string::npos) {
+              std::string field = p.substr(0, colon);
+              int64_t val = std::stoll(p.substr(colon + 1));
+              apply_patch_int(std::string(key), field, val);
+            }
+          } else if (op == WalOp::DELETE_) {
+            apply_del(key);
+          }
+        });
   }
 
-  // Now returns a lite3::Buffer directly
   lite3cpp::Buffer get(std::string_view key) {
     auto &s = get_shard(key);
     std::shared_lock lock(s.mx);
     if (auto it = s.map.find(std::string(key)); it != s.map.end()) {
-      // Return a copy of the Blob's internal buffer
       return it->second->buf_;
     }
-    return lite3cpp::Buffer(); // Return empty Buffer if not found
+    return lite3cpp::Buffer();
   }
 
-  // Now takes a JSON string, which Blob::overwrite will handle
   void put(std::string key, std::string_view json_body) {
     wal_->append(WalOp::PUT, key, json_body);
-    auto &s = get_shard(key);
-    std::unique_lock lock(s.mx);
-
-    if (!s.map.contains(key)) {
-      // Initial capacity for Blob's buffer. We need to estimate based on
-      // json_body.size() For now, let's just use a default, or parse JSON once
-      // to get internal size. Simplified: Blob constructor already initializes
-      // as object. overwrite will adjust.
-      s.map[key] = std::make_unique<Blob>(&s.pool);
-    }
-    s.map[key]->overwrite(json_body);
+    apply_put(std::move(key), json_body);
   }
 
   void patch_int(std::string key, std::string field, int64_t val) {
     std::string log_payload = field + ":" + std::to_string(val);
     wal_->append(WalOp::PATCH_I64, key, log_payload);
+    apply_patch_int(std::move(key), field, val);
+  }
 
+  bool del(std::string_view key) {
+    wal_->append(WalOp::DELETE_, key, "");
+    return apply_del(key);
+  }
+
+private:
+  void apply_put(std::string key, std::string_view json_body) {
     auto &s = get_shard(key);
     std::unique_lock lock(s.mx);
-
     if (!s.map.contains(key)) {
-      s.map[key] = std::make_unique<Blob>(
-          &s.pool); // Initialize as empty object if not exists
+      s.map[key] = std::make_unique<Blob>(&s.pool);
+    }
+    s.map[key]->overwrite(json_body);
+  }
+
+  void apply_patch_int(std::string key, std::string field, int64_t val) {
+    auto &s = get_shard(key);
+    std::unique_lock lock(s.mx);
+    if (!s.map.contains(key)) {
+      s.map[key] = std::make_unique<Blob>(&s.pool);
     }
     s.map[key]->set_int(field, val);
   }
 
-  bool del(std::string_view key) {
-    wal_->append(WalOp::DELETE_, key, ""); // Log delete operation
+  bool apply_del(std::string_view key) {
     auto &s = get_shard(key);
     std::unique_lock lock(s.mx);
-
-    if (s.map.erase(std::string(
-            key))) { // erase returns number of elements removed (0 or 1)
-      return true;   // Key was found and deleted
-    }
-    return false; // Key not found
+    return s.map.erase(std::string(key)) > 0;
   }
 };
