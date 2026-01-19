@@ -7,7 +7,16 @@
 * **Zero-Copy Architecture:** Data stays in the buffer; no intermediate object trees.
 * **HTTP/1.1 Interface:** Standard REST API (`GET`, `PUT`, `DELETE`, `PATCH`).
 * **Observability:** Built-in metrics endpoint for latency and operation counts.
-* **Durability:** WAL-based persistence (Work In Progress).
+* **Durability:** WAL-based persistence with CRC32 integrity checks.
+
+## 💾 Durability & Persistence
+
+L3KV ensures data safety through a Write-Ahead Log (WAL).
+
+*   **Write-Ahead Log:** Every mutation (`PUT`, `DELETE`, `PATCH`) is appended to `data.wal` before being applied to the in-memory state.
+*   **Crash Recovery:** On startup, the service replays the WAL to restore the dataset.
+*   **Integrity Verification:** Each WAL entry is protected by a CRC32 checksum. Corrupted entries (e.g., from partial writes during power loss) are detected during recovery to prevent data corruption.
+*   **Log Format:** Binary format with `[CRC32][OpType][KeyLen][PayloadLen][Key][Payload]`.
 
 ## 🛠️ Build & Run (Windows)
 
