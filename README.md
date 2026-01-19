@@ -18,6 +18,12 @@ L3KV ensures data safety through a Write-Ahead Log (WAL).
 *   **Integrity Verification:** Each WAL entry is protected by a CRC32 checksum. Corrupted entries (e.g., from partial writes during power loss) are detected during recovery to prevent data corruption.
 *   **Log Format:** Binary format with `[CRC32][OpType][KeyLen][PayloadLen][Key][Payload]`.
 
+### Failure Scenarios & Recovery
+*   **Power Loss / Crash during Write:** If the server is terminated while writing a log entry (e.g., partial payload written):
+    *   **Detection:** The recovery process detects either an `Unexpected EOF` (truncated entry) or a `CRC Mismatch` (corrupted entry).
+    *   **Action:** The corrupted entry is **discarded**. The recovery process halts at the last valid entry.
+    *   **Result:** The database effectively rolls back to the state immediately preceding the failed write. No partial or corrupted data is ever applied to the in-memory store.
+
 ## 🛠️ Build & Run (Windows)
 
 ### Prerequisites
