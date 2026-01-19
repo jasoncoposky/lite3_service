@@ -93,45 +93,74 @@ public:
   using RecoverCallback =
       std::function<void(WalOp, std::string_view, std::string_view)>;
   void recover(RecoverCallback callback) {
+    // Initialize temporary Reader Conveyor for buffered recovery
+    libconveyor::v2::Config read_cfg;
+    read_cfg.handle = (storage_handle_t)file_.h;
+    read_cfg.ops = wal::WindowsStorage::get_ops();
+    read_cfg.write_capacity =
+        64 * 1024; // Small write buffer, we are only reading
+    read_cfg.read_capacity = 10 * 1024 * 1024; // 10MB Read Buffer for speed
+
+    auto read_create_res = libconveyor::v2::Conveyor::create(read_cfg);
+    if (!read_create_res) {
+      std::cerr << "WAL Recovery: Failed to create reader conveyor. Falling "
+                   "back to unbuffered.\n";
+    }
+
+    auto &reader = read_create_res.value();
     off_t offset = 0;
+
+    struct Buffered {
+      libconveyor::v2::Conveyor &r;
+      off_t &off;
+      std::vector<uint8_t> &buf;
+
+      bool read(void *dest, size_t len, const char *ctx) {
+        buf.resize(len);
+        auto res = r.read(buf);
+        if (!res) {
+          std::cerr << "WAL Recovery [" << ctx
+                    << "]: Read error: " << res.error().message() << "\n";
+          return false;
+        }
+        if (res.value() != len) {
+          if (res.value() > 0) {
+            std::cerr << "WAL Recovery [" << ctx << "]: Partial read ("
+                      << res.value() << "/" << len << ")\n";
+          }
+          return false;
+        }
+        std::memcpy(dest, buf.data(), len);
+        off += (off_t)len;
+        return true;
+      }
+    };
+
+    std::vector<uint8_t> read_buf;
+    Buffered b{reader, offset, read_buf};
 
     while (true) {
       LogHeader h;
-      ssize_t bytes =
-          wal::WindowsStorage::pread_impl(file_.h, &h, sizeof(h), offset);
-      if (bytes <= 0)
+      if (!b.read(&h, sizeof(h), "HEADER"))
         break;
-
-      if (bytes < sizeof(h)) {
-        std::cerr << "WAL Recovery: Truncated header at offset " << offset
-                  << "\n";
-        break;
-      }
-      offset += sizeof(h);
 
       std::string key(h.key_len, '\0');
       std::string payload(h.payload_len, '\0');
 
       if (h.key_len > 0) {
-        bytes = wal::WindowsStorage::pread_impl(file_.h, key.data(), h.key_len,
-                                                offset);
-        if (bytes != h.key_len) {
+        if (!b.read(key.data(), h.key_len, "KEY")) {
           std::cerr << "WAL Recovery: Truncated key at offset " << offset
                     << "\n";
           break;
         }
-        offset += h.key_len;
       }
 
       if (h.payload_len > 0) {
-        bytes = wal::WindowsStorage::pread_impl(file_.h, payload.data(),
-                                                h.payload_len, offset);
-        if (bytes != h.payload_len) {
+        if (!b.read(payload.data(), h.payload_len, "PAYLOAD")) {
           std::cerr << "WAL Recovery: Truncated payload at offset " << offset
                     << "\n";
           break;
         }
-        offset += h.payload_len;
       }
 
       uint32_t computed = compute_crc(h.op, key, payload);
@@ -148,6 +177,7 @@ public:
       }
       callback((WalOp)h.op, key, payload);
     }
+    std::cerr << "WAL Recovery: Completed at offset " << offset << "\n";
 
     // Initialize Conveyor now that we are done reading
     libconveyor::v2::Config cfg;
