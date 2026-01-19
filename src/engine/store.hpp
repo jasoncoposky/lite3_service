@@ -71,19 +71,24 @@ public:
     // Recover from WAL
     wal_->recover(
         [this](WalOp op, std::string_view key, std::string_view payload) {
-          if (op == WalOp::PUT) {
-            apply_put(std::string(key), payload);
-          } else if (op == WalOp::PATCH_I64) {
-            // payload format: "field:val"
-            std::string p(payload);
-            size_t colon = p.find(':');
-            if (colon != std::string::npos) {
-              std::string field = p.substr(0, colon);
-              int64_t val = std::stoll(p.substr(colon + 1));
-              apply_patch_int(std::string(key), field, val);
+          try {
+            if (op == WalOp::PUT) {
+              apply_put(std::string(key), payload);
+            } else if (op == WalOp::PATCH_I64) {
+              // payload format: "field:val"
+              std::string p(payload);
+              size_t colon = p.find(':');
+              if (colon != std::string::npos) {
+                std::string field = p.substr(0, colon);
+                int64_t val = std::stoll(p.substr(colon + 1));
+                apply_patch_int(std::string(key), field, val);
+              }
+            } else if (op == WalOp::DELETE_) {
+              apply_del(key);
             }
-          } else if (op == WalOp::DELETE_) {
-            apply_del(key);
+          } catch (const std::exception &e) {
+            // Silently skip or log to stderr only on failure
+            std::cerr << "WAL Recovery Skip: " << e.what() << "\n";
           }
         });
   }
@@ -112,6 +117,10 @@ public:
     wal_->append(WalOp::DELETE_, key, "");
     return apply_del(key);
   }
+
+  void flush() { wal_->flush(); }
+
+  auto get_wal_stats() { return wal_->stats(); }
 
 private:
   void apply_put(std::string key, std::string_view json_body) {

@@ -1,15 +1,12 @@
 #pragma once
+#include "wal_storage.hpp"
+#include <array>
 #include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <fstream>
 #include <functional>
 #include <iostream>
 #include <mutex>
-#include <span>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 enum class WalOp : uint8_t { PUT = 1, PATCH_I64 = 2, DELETE_ = 3 };
@@ -24,25 +21,31 @@ struct LogHeader {
 #pragma pack(pop)
 
 class WriteAheadLog {
-  struct Entry {
-    WalOp op;
-    std::string key;
-    std::string payload;
+  struct FileHandle {
+    HANDLE h;
+    FileHandle(const std::string &p) {
+      h = CreateFileA(p.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
+                      NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+      if (h == INVALID_HANDLE_VALUE)
+        throw std::runtime_error("Failed to open WAL file: " + p);
+    }
+    ~FileHandle() {
+      if (h != INVALID_HANDLE_VALUE)
+        CloseHandle(h);
+    }
   };
 
   std::string path_;
-  std::ofstream file_;
-  std::vector<Entry> queue_;
-  std::mutex mx_;
-  std::condition_variable cv_;
-  std::jthread writer_thread_;
-  std::atomic<bool> running_{true};
+  FileHandle file_; // Destroyed LAST (after wal_)
+  std::unique_ptr<libconveyor::v2::Conveyor>
+      wal_; // Destroyed FIRST (flushes to file_)
 
-  // Simple CRC32 implementation to avoid external dependencies
+  std::mutex mx_;
+  std::vector<uint8_t> scratch_;
+
   static uint32_t compute_crc(uint8_t op, std::string_view key,
                               std::string_view payload) {
     uint32_t crc = 0xFFFFFFFF;
-
     auto process = [&](const void *data, size_t len) {
       const uint8_t *p = (const uint8_t *)data;
       for (size_t i = 0; i < len; i++) {
@@ -51,102 +54,132 @@ class WriteAheadLog {
           crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
       }
     };
-
     process(&op, sizeof(op));
     process(key.data(), key.size());
     process(payload.data(), payload.size());
-
     return ~crc;
   }
 
 public:
-  explicit WriteAheadLog(std::string path) : path_(std::move(path)) {
-    // Open for append
-    file_.open(path_, std::ios::binary | std::ios::app);
-    writer_thread_ = std::jthread([this] { loop(); });
+  explicit WriteAheadLog(std::string path)
+      : path_(std::move(path)), file_(path_) {
+    // Conveyor is initialized in recover() to avoid contention with read loop
   }
 
   void append(WalOp op, std::string_view key, std::string_view payload) {
-    {
-      std::lock_guard lock(mx_);
-      queue_.emplace_back(Entry{op, std::string(key), std::string(payload)});
-    }
-    cv_.notify_one();
+    std::lock_guard lock(mx_);
+    uint32_t crc = compute_crc((uint8_t)op, key, payload);
+
+    LogHeader h{crc, (uint8_t)op, (uint16_t)key.size(),
+                (uint32_t)payload.size()};
+    size_t total_len = sizeof(h) + key.size() + payload.size();
+
+    if (scratch_.capacity() < total_len)
+      scratch_.reserve(total_len * 2);
+    scratch_.clear();
+
+    const uint8_t *p = (const uint8_t *)&h;
+    scratch_.insert(scratch_.end(), p, p + sizeof(h));
+    scratch_.insert(scratch_.end(), key.begin(), key.end());
+    scratch_.insert(scratch_.end(), payload.begin(), payload.end());
+
+    auto res = wal_->write(scratch_);
+    if (!res)
+      std::cerr << "WAL Write Error: " << res.error().message() << "\n";
   }
 
-  void recover(
-      std::function<void(WalOp, std::string_view, std::string_view)> callback) {
-    // Open separate stream for reading
-    std::ifstream in(path_, std::ios::binary);
-    if (!in.is_open())
-      return;
+  using RecoverCallback =
+      std::function<void(WalOp, std::string_view, std::string_view)>;
+  void recover(RecoverCallback callback) {
+    // Reset position to 0 for recovery read
+    off_t offset = 0;
 
-    while (in.peek() != EOF) {
+    while (true) {
       LogHeader h;
-      if (!in.read((char *)&h, sizeof(h)))
+
+      // Direct Read bypassing Conveyor to avoid EOF hang
+      ssize_t bytes =
+          wal::WindowsStorage::pread_impl(file_.h, &h, sizeof(h), offset);
+      if (bytes <= 0)
+        break; // EOF or Error
+
+      if (bytes < sizeof(h)) {
+        std::cerr << "WAL Recovery: Truncated header\n";
         break;
+      }
+
+      offset += sizeof(h);
 
       std::string key(h.key_len, '\0');
       std::string payload(h.payload_len, '\0');
 
-      if (h.key_len > 0 && !in.read(key.data(), h.key_len)) {
-        std::cerr << "WAL Recovery: Unexpected EOF reading key\n";
-        break;
+      if (h.key_len > 0) {
+        bytes = wal::WindowsStorage::pread_impl(file_.h, key.data(), h.key_len,
+                                                offset);
+        if (bytes != h.key_len) {
+          std::cerr << "WAL Recovery: Truncated key\n";
+          break;
+        }
+        offset += h.key_len;
       }
-      if (h.payload_len > 0 && !in.read(payload.data(), h.payload_len)) {
-        std::cerr << "WAL Recovery: Unexpected EOF reading payload\n";
-        break;
+      if (h.payload_len > 0) {
+        bytes = wal::WindowsStorage::pread_impl(file_.h, payload.data(),
+                                                h.payload_len, offset);
+        if (bytes != h.payload_len) {
+          std::cerr << "WAL Recovery: Truncated payload\n";
+          break;
+        }
+        offset += h.payload_len;
       }
 
       uint32_t computed = compute_crc(h.op, key, payload);
       if (computed != h.crc) {
-        // If CRC is 0, we might assume it's legacy data if we supported that,
-        // but for "bulletproof", 0 is invalid unless data actually sums to 0
-        // (unlikely with CRC32 invert). However, previous implementation wrote
-        // 0.
         if (h.crc == 0 && computed != 0) {
-          // Warn but accept for legacy compatibility during dev?
-          // Or reject. User said "bulletproof". Corrupt data is worse than lost
-          // data? Let's print warning and continue if it looks like legacy.
-          std::cerr << "WAL WARNING: Legacy/Zero CRC found. Accepting.\n";
+          std::cerr << "WAL WARNING: Zero CRC allowed for legacy.\n";
         } else {
           std::cerr << "WAL ERROR: CRC Mismatch at offset "
-                    << (size_t)in.tellg() - sizeof(h) - h.key_len -
-                           h.payload_len
-                    << ". Aborting recovery.\n";
+                    << offset - sizeof(h) - h.key_len - h.payload_len
+                    << ". Transaction may be partial or corrupt.\n";
           break;
         }
       }
-
       callback((WalOp)h.op, key, payload);
+    }
+
+    // Initialize Conveyor now that we are done reading
+    libconveyor::v2::Config cfg;
+    cfg.handle = (storage_handle_t)file_.h;
+    cfg.ops = wal::WindowsStorage::get_ops();
+    cfg.write_capacity = 20 * 1024 * 1024; // 20MB
+    cfg.read_capacity = 5 * 1024 * 1024;
+
+    auto create_res = libconveyor::v2::Conveyor::create(cfg);
+    if (!create_res)
+      throw std::system_error(create_res.error());
+    wal_ = std::make_unique<libconveyor::v2::Conveyor>(
+        std::move(create_res.value()));
+
+    // Seek to end to prepare for appending
+    auto seek_res = wal_->seek(0, SEEK_END);
+    if (!seek_res) {
+      std::cerr << "WAL: Seeding failure: " << seek_res.error().message()
+                << "\n";
     }
   }
 
-private:
-  void loop() {
-    std::vector<Entry> batch;
-    batch.reserve(1024);
-
-    while (running_) {
-      {
-        std::unique_lock lock(mx_);
-        cv_.wait(lock, [this] { return !queue_.empty() || !running_; });
-        if (!running_ && queue_.empty())
-          return;
-        std::swap(batch, queue_);
+  void flush() {
+    std::lock_guard lock(mx_);
+    if (wal_) {
+      auto res = wal_->flush();
+      if (!res) {
+        std::cerr << "WAL Flush Error: " << res.error().message() << "\n";
       }
-
-      for (const auto &e : batch) {
-        uint32_t crc = compute_crc((uint8_t)e.op, e.key, e.payload);
-        LogHeader h{crc, (uint8_t)e.op, (uint16_t)e.key.size(),
-                    (uint32_t)e.payload.size()};
-        file_.write((char *)&h, sizeof(h));
-        file_.write(e.key.data(), e.key.size());
-        file_.write(e.payload.data(), e.payload.size());
-      }
-
-      file_.flush();
-      batch.clear();
     }
+  }
+
+  auto stats() {
+    if (!wal_)
+      return libconveyor::v2::Conveyor::Stats{};
+    return wal_->stats();
   }
 };

@@ -1,3 +1,13 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+
+// Fix conflict with Boost.Beast
+#ifdef off_t
+#undef off_t
+#endif
+
 #include "http_server.hpp"
 #include <boost/asio/dispatch.hpp>
 #include <boost/beast/version.hpp>
@@ -15,8 +25,6 @@
 #include "observability/simple_metrics.hpp"
 
 namespace http_server {
-
-Engine db("data.wal");
 
 struct ScopedMetric {
   std::string_view op;
@@ -43,11 +51,14 @@ struct ScopedMetric {
 // Basic session to handle a single request/response
 class session : public std::enable_shared_from_this<session> {
   tcp::socket socket_;
+  net::io_context &ioc_;
   beast::flat_buffer buffer_;
   http::request<http::string_body> req_;
+  Engine &db_;
 
 public:
-  session(tcp::socket &&socket) : socket_(std::move(socket)) {}
+  session(tcp::socket &&socket, net::io_context &ioc, Engine &db)
+      : socket_(std::move(socket)), ioc_(ioc), db_(db) {}
 
   void run() { do_read(); }
 
@@ -108,6 +119,7 @@ private:
       http::response<http::empty_body> res{http::status::ok, req_.version()};
       res.set(http::field::server, "Lite3");
       res.keep_alive(req_.keep_alive());
+      res.prepare_payload();
       return send_response(std::move(res));
     }
 
@@ -117,8 +129,17 @@ private:
       if (metrics) {
         body = metrics->get_metrics_string();
       } else {
-        body = "Metrics not available (null)";
+        body = "Metrics not available (null)\n";
       }
+
+      auto wal_stats = db_.get_wal_stats();
+      body += "\n=== WAL Metrics (libconveyor) ===\n";
+      body +=
+          "Bytes Written: " + std::to_string(wal_stats.bytes_written) + "\n";
+      body += "Avg Write Latency: " +
+              std::to_string(wal_stats.avg_write_latency.count()) + " ms\n";
+      body += "Buffer Full Events: " +
+              std::to_string(wal_stats.write_buffer_full_events) + "\n";
 
       http::response<http::string_body> res{http::status::ok, req_.version()};
       res.set(http::field::server, "Lite3");
@@ -130,8 +151,9 @@ private:
 
     if (req_.method() == http::verb::get && target.starts_with("/kv/")) {
       std::string key = target.substr(4);
-      lite3cpp::Buffer buffer_data = db.get(key); // db.get now returns a Buffer
-      if (buffer_data.size() == 0) {              // Check if buffer is empty
+      lite3cpp::Buffer buffer_data =
+          db_.get(key);              // db.get now returns a Buffer
+      if (buffer_data.size() == 0) { // Check if buffer is empty
         http::response<http::empty_body> res{http::status::not_found,
                                              req_.version()};
         res.keep_alive(req_.keep_alive());
@@ -155,9 +177,10 @@ private:
     if (req_.method() == http::verb::put && target.starts_with("/kv/")) {
       std::string key = target.substr(4);
       try {
-        db.put(key, req_.body());
+        db_.put(key, req_.body());
         http::response<http::empty_body> res{http::status::ok, req_.version()};
         res.keep_alive(req_.keep_alive());
+        res.prepare_payload();
         return send_response(std::move(res));
       } catch (const std::exception &e) {
         std::cerr << "Error: " << e.what() << "\n";
@@ -174,9 +197,10 @@ private:
 
       if (params["op"] == "set_int") {
         int64_t val = std::stoll(params["val"]);
-        db.patch_int(key, params["field"], val);
+        db_.patch_int(key, params["field"], val);
         http::response<http::empty_body> res{http::status::ok, req_.version()};
         res.keep_alive(req_.keep_alive());
+        res.prepare_payload();
         return send_response(std::move(res));
       }
       return send_response(bad_req("Unknown op"));
@@ -184,14 +208,16 @@ private:
 
     if (req_.method() == http::verb::delete_ && target.starts_with("/kv/")) {
       std::string key = target.substr(4);
-      if (db.del(key)) {
+      if (db_.del(key)) {
         http::response<http::empty_body> res{http::status::ok, req_.version()};
         res.keep_alive(req_.keep_alive());
+        res.prepare_payload();
         return send_response(std::move(res));
       } else {
         http::response<http::empty_body> res{http::status::not_found,
                                              req_.version()};
         res.keep_alive(req_.keep_alive());
+        res.prepare_payload();
         return send_response(std::move(res));
       }
     }
@@ -235,14 +261,23 @@ private:
   }
 };
 
-http_server::http_server(std::string address, unsigned short port)
+http_server::http_server(Engine &db, std::string address, unsigned short port)
     : address_(std::move(address)), port_(port), ioc_(1),
-      acceptor_(ioc_, {net::ip::make_address(address_), port_}) {}
+      signals_(ioc_, SIGINT, SIGTERM, SIGBREAK),
+      acceptor_(ioc_, {net::ip::make_address(address_), port_}), db_(db) {
+  signals_.async_wait(
+      [this](boost::system::error_code /*ec*/, int /*signal*/) { stop(); });
+}
 
 void http_server::run() {
+  std::cout << "DEBUG: http_server::run() called" << std::endl;
   do_accept();
+  std::cout << "DEBUG: calling ioc_.run()" << std::endl;
   ioc_.run();
+  std::cout << "DEBUG: ioc_.run() returned" << std::endl;
 }
+
+void http_server::stop() { ioc_.stop(); }
 
 void http_server::do_accept() {
   acceptor_.async_accept(
@@ -264,7 +299,7 @@ void http_server::on_accept(beast::error_code ec, tcp::socket socket) {
   }
 
   // Create a session and run it
-  std::make_shared<session>(std::move(socket))->run();
+  std::make_shared<session>(std::move(socket), ioc_, db_)->run();
 
   // Accept another connection
   do_accept();
