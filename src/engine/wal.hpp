@@ -1,10 +1,12 @@
 #pragma once
+#include "libconveyor/conveyor_modern.hpp"
 #include "wal_storage.hpp"
 #include <array>
 #include <atomic>
 #include <functional>
 #include <iostream>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -91,23 +93,20 @@ public:
   using RecoverCallback =
       std::function<void(WalOp, std::string_view, std::string_view)>;
   void recover(RecoverCallback callback) {
-    // Reset position to 0 for recovery read
     off_t offset = 0;
 
     while (true) {
       LogHeader h;
-
-      // Direct Read bypassing Conveyor to avoid EOF hang
       ssize_t bytes =
           wal::WindowsStorage::pread_impl(file_.h, &h, sizeof(h), offset);
       if (bytes <= 0)
-        break; // EOF or Error
+        break;
 
       if (bytes < sizeof(h)) {
-        std::cerr << "WAL Recovery: Truncated header\n";
+        std::cerr << "WAL Recovery: Truncated header at offset " << offset
+                  << "\n";
         break;
       }
-
       offset += sizeof(h);
 
       std::string key(h.key_len, '\0');
@@ -117,16 +116,19 @@ public:
         bytes = wal::WindowsStorage::pread_impl(file_.h, key.data(), h.key_len,
                                                 offset);
         if (bytes != h.key_len) {
-          std::cerr << "WAL Recovery: Truncated key\n";
+          std::cerr << "WAL Recovery: Truncated key at offset " << offset
+                    << "\n";
           break;
         }
         offset += h.key_len;
       }
+
       if (h.payload_len > 0) {
         bytes = wal::WindowsStorage::pread_impl(file_.h, payload.data(),
                                                 h.payload_len, offset);
         if (bytes != h.payload_len) {
-          std::cerr << "WAL Recovery: Truncated payload\n";
+          std::cerr << "WAL Recovery: Truncated payload at offset " << offset
+                    << "\n";
           break;
         }
         offset += h.payload_len;
@@ -138,7 +140,8 @@ public:
           std::cerr << "WAL WARNING: Zero CRC allowed for legacy.\n";
         } else {
           std::cerr << "WAL ERROR: CRC Mismatch at offset "
-                    << offset - sizeof(h) - h.key_len - h.payload_len
+                    << offset - (off_t)sizeof(h) - (off_t)h.key_len -
+                           (off_t)h.payload_len
                     << ". Transaction may be partial or corrupt.\n";
           break;
         }
