@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <fstream>
 #include <vector>
 #include <string>
@@ -10,7 +10,7 @@
 #include <vector>
 #include <span>
 
-enum class WalOp : uint8_t { PUT = 1, PATCH_I64 = 2 };
+enum class WalOp : uint8_t { PUT = 1, PATCH_I64 = 2, DELETE_ = 3 }; // Added DELETE_
 
 #pragma pack(push, 1)
 struct LogHeader {
