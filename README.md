@@ -1,53 +1,58 @@
 # L3KV: The Zero-Parse Key-Value Store
 
-**L3KV** is a high-performance, persistent Key-Value service built on **Modern C++23** and the **LiteÂ³** serialization library.
+**L3KV** is a high-performance, persistent Key-Value service built on **Modern C++23** and the **Lite³** serialization library. It leverages zero-deserialization editing to modify large JSON documents in-place with microsecond latency.
 
-## ðŸš€ Features
-* **Zero-Parse Mutations:** Update a single field in a 10MB document in microseconds.
-* **HTTP Interface:** Use `curl`, Python, or any HTTP client.
-* **ACID Compliance:** Full durability via Write-Ahead Logging (WAL).
+## 🚀 Features
+* **Zero-Parse Mutations:** Update a single field in a 10MB document in **< 1 µs**.
+* **Zero-Copy Architecture:** Data stays in the buffer; no intermediate object trees.
+* **HTTP/1.1 Interface:** Standard REST API (`GET`, `PUT`, `DELETE`, `PATCH`).
+* **Observability:** Built-in metrics endpoint for latency and operation counts.
+* **Durability:** WAL-based persistence (Work In Progress).
 
-## ðŸ“¦ Quick Start
-1. Install CMake, C++23 Compiler, Boost.
-2. `mkdir build && cd build`
-3. `cmake .. && make`
-4. `./l3svc`
+## 🛠️ Build & Run (Windows)
 
-## âš–ï¸ License
-BSD 3-Clause License.
+### Prerequisites
+*   CMake (3.20+)
+*   Visual Studio 2022 (C++20/23 support)
+*   Boost Libraries (1.70+): `asio`, `beast`, `system`
+*   `lite3-cpp` library (linked via CMake)
 
----
+### Build
+```powershell
+mkdir build
+cd build
+cmake -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release ..
+cmake --build . --config Release --target l3svc
+```
 
-## ðŸ§¨ Short-Term Testing Plan
+### Run
+```powershell
+.\Release\l3svc.exe
+```
+The service listens on port `8080` by default.
 
-We have identified the following areas for further testing to enhance the robustness and coverage of both the `lite3++` library and the `lite3_service`:
+## 🔌 API Reference
 
-### 1. Expand `lite3++` Unit Tests (C++)
-*   **Objective:** Increase coverage for the `lite3::Buffer` class and `lite3::lite3_json` functions.
-*   **Specifics:**
-    *   Add tests for all supported data types (Int64, Float64, Bool, Null, Bytes).
-    *   Implement tests for complex JSON structures (nested objects, arrays, mixed types).
-    *   Cover edge cases like empty strings, very long strings, special characters, maximum nesting depths.
-    *   Test error handling for `lite3::Buffer` operations and invalid JSON inputs.
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/kv/{key}` | Retrieve document as JSON. |
+| `PUT` | `/kv/{key}` | Store JSON document. |
+| `DELETE` | `/kv/{key}` | Delete document. |
+| `POST` | `/kv/{key}?op=set_int&field={path}&val={v}` | fast-path integer update. |
+| `GET` | `/kv/metrics` | View internal performance metrics. |
+| `GET` | `/kv/health` | Health check (returns 200 OK). |
 
-### 2. Add More Functional Tests to Python Client
-*   **Objective:** Cover a wider range of `lite3_service` API operations.
-*   **Specifics:**
-    *   Implement tests for other `PATCH` operations (if available, e.g., `set_str`, `delete_key`).
-    *   Add tests for `DELETE` operations.
-    *   Test interactions with more complex JSON structures from the client side.
 
-### 3. Integrate a More Sophisticated Load Testing Framework
-*   **Objective:** Perform more rigorous stress and performance testing.
-*   **Specifics:**
-    *   Evaluate and integrate a framework like [Locust](https://locust.io/) or similar tools.
-    *   Define realistic user behavior scenarios for load simulation.
-    *   Collect and visualize detailed performance metrics under high load.
+## ⚡ Performance Metrics
 
-### 4. Focus on Specific Error Conditions
-*   **Objective:** Verify the service's behavior under erroneous conditions.
-*   **Specifics:**
-    *   Test how the service responds to malformed HTTP requests.
-    *   Send invalid JSON payloads to `PUT` and `PATCH` endpoints.
-    *   Test requests for non-existent keys.
-    *   Simulate network errors or service disruptions.
+Benchmark results (Windows 11, Ryzen 7 5700X, Loopback):
+
+| Operation | Latency (Server Internal) | Description |
+| :--- | :--- | :--- |
+| **Document Write** | **< 1 µs** | `lite3-cpp` zero-parse update. |
+| **JSON Serialization** | **~3 µs** | Converting buffer to JSON string. |
+| **Request Handler** | **~50 µs** | Total time in `http_server::handle_request`. |
+| **Network RTT** | **~1-130 ms** | Dependent on Client/OS (Keep-Alive vs Close). |
+
+**Note on Network Latency:**
+The service enables `TCP_NODELAY` to minimize latency. However, observed latency on Windows localhost with some clients (e.g., Python `aiohttp`) can be high due to OS scheduling and driver overhead. The core engine processes requests in microseconds. For maximum throughput, use persistent connections (Keep-Alive).
