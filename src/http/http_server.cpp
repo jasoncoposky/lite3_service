@@ -307,19 +307,33 @@ private:
   }
 };
 
-http_server::http_server(Engine &db, std::string address, unsigned short port)
-    : address_(std::move(address)), port_(port), ioc_(1),
+http_server::http_server(Engine &db, std::string address, unsigned short port,
+                         int threads)
+    : address_(std::move(address)), port_(port), ioc_(threads),
       signals_(ioc_, SIGINT, SIGTERM, SIGBREAK),
-      acceptor_(ioc_, {net::ip::make_address(address_), port_}), db_(db) {
+      acceptor_(ioc_, {net::ip::make_address(address_), port_}), db_(db),
+      threads_(threads) {
   signals_.async_wait(
       [this](boost::system::error_code /*ec*/, int /*signal*/) { stop(); });
 }
 
 void http_server::run() {
-  std::cout << "DEBUG: http_server::run() called" << std::endl;
+  std::cout << "DEBUG: http_server::run() called with " << threads_
+            << " threads" << std::endl;
   do_accept();
+
+  std::vector<std::thread> v;
+  v.reserve(threads_ - 1);
+  for (auto i = threads_ - 1; i > 0; --i)
+    v.emplace_back([this] { ioc_.run(); });
+
   std::cout << "DEBUG: calling ioc_.run()" << std::endl;
   ioc_.run();
+
+  for (auto &t : v)
+    if (t.joinable())
+      t.join();
+
   std::cout << "DEBUG: ioc_.run() returned" << std::endl;
 }
 

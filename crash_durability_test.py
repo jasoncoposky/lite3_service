@@ -36,7 +36,7 @@ async def test_crash_during_write(cycle):
         try: os.remove("data.wal")
         except: pass
         
-    proc = subprocess.Popen([SERVICE_EXE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen([SERVICE_EXE, "4"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if not await wait_for_service():
         print("Failed to start service")
         return
@@ -56,7 +56,7 @@ async def test_crash_during_write(cycle):
 
     # 2. Restart and Verify
     print("Restarting service to verify recovery...")
-    proc = subprocess.Popen([SERVICE_EXE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen([SERVICE_EXE, "4"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if not await wait_for_service():
         print("Failed to restart service")
         return

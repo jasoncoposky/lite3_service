@@ -11,9 +11,16 @@
 // Global metrics instance to be accessible from signal handler
 SimpleMetrics global_metrics;
 
-int main() {
+int main(int argc, char *argv[]) {
   try {
-    std::cout << "Starting Lite3 Service..." << std::endl;
+    int threads = 1;
+    if (argc > 1) {
+      threads = std::stoi(argv[1]);
+      if (threads < 1)
+        threads = 1;
+    }
+    std::cout << "Starting Lite3 Service with " << threads << " threads..."
+              << std::endl;
 
     // Register metrics with lite3-cpp
     std::cout << "DEBUG: Metrics init..." << std::endl;
@@ -24,7 +31,7 @@ int main() {
     Engine db("data.wal");
     std::cout << "DEBUG: Engine init done." << std::endl;
 
-    http_server::http_server server(db, "0.0.0.0", 8080);
+    http_server::http_server server(db, "0.0.0.0", 8080, threads);
     std::cout << "DEBUG: Server init done." << std::endl;
 
     std::cout << "Lite3 Service listening on :8080" << std::endl;

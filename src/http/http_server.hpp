@@ -28,7 +28,8 @@ using tcp = net::ip::tcp;
 
 class http_server {
 public:
-  http_server(Engine &db, std::string address, unsigned short port);
+  http_server(Engine &db, std::string address, unsigned short port,
+              int threads = 1);
   void run();
   void stop();
 
@@ -42,6 +43,7 @@ private:
   net::signal_set signals_;
   tcp::acceptor acceptor_;
   Engine &db_;
+  int threads_;
 };
 
 } // namespace http_server

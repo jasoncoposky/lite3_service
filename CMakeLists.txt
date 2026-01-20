@@ -25,12 +25,11 @@ add_executable(l3svc
 )
 
 # Set include directories for l3svc (must be AFTER add_executable)
+# Set include directories for l3svc (must be AFTER add_executable)
 target_include_directories(l3svc PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/../lib/lite3-cpp/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../lib/libconveyor/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../lib/lite3-cpp/include/utils
-    ${CMAKE_CURRENT_SOURCE_DIR}/../lib/yyjson/src
     "${CMAKE_CURRENT_SOURCE_DIR}/../lib/boost_1_89_0" # Explicitly add Boost root for includes
 )
 
@@ -38,12 +37,8 @@ target_link_libraries(l3svc PRIVATE
     Threads::Threads
     ws2_32
     bcrypt
-    Threads::Threads
-    ws2_32
-    bcrypt
     lite3-cpp
     conveyor
-    # No Boost.Log specific libraries linked
 )
 
 if(MSVC)
