@@ -16,16 +16,16 @@ int main() {
     std::cout << "Starting Lite3 Service..." << std::endl;
 
     // Register metrics with lite3-cpp
+    std::cout << "DEBUG: Metrics init..." << std::endl;
     lite3cpp::set_metrics(&global_metrics);
 
     // Initialize Database Engine
+    std::cout << "DEBUG: Engine init..." << std::endl;
     Engine db("data.wal");
-
-    std::cout << "Observability enabled. Metrics will be dumped on CTRL+C (or "
-                 "SIGTERM)."
-              << std::endl;
+    std::cout << "DEBUG: Engine init done." << std::endl;
 
     http_server::http_server server(db, "0.0.0.0", 8080);
+    std::cout << "DEBUG: Server init done." << std::endl;
 
     std::cout << "Lite3 Service listening on :8080" << std::endl;
     server.run();

@@ -28,8 +28,11 @@ class WriteAheadLog {
     FileHandle(const std::string &p) {
       h = CreateFileA(p.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
                       NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-      if (h == INVALID_HANDLE_VALUE)
-        throw std::runtime_error("Failed to open WAL file: " + p);
+      if (h == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        throw std::runtime_error("Failed to open WAL file: " + p +
+                                 " Error: " + std::to_string(err));
+      }
     }
     ~FileHandle() {
       if (h != INVALID_HANDLE_VALUE)
@@ -93,106 +96,132 @@ public:
   using RecoverCallback =
       std::function<void(WalOp, std::string_view, std::string_view)>;
   void recover(RecoverCallback callback) {
-    // Initialize temporary Reader Conveyor for buffered recovery
-    libconveyor::v2::Config read_cfg;
-    read_cfg.handle = (storage_handle_t)file_.h;
-    read_cfg.ops = wal::WindowsStorage::get_ops();
-    read_cfg.write_capacity =
-        64 * 1024; // Small write buffer, we are only reading
-    read_cfg.read_capacity = 10 * 1024 * 1024; // 10MB Read Buffer for speed
+    std::cout << "DEBUG: WAL::recover start" << std::endl;
 
-    auto read_create_res = libconveyor::v2::Conveyor::create(read_cfg);
-    if (!read_create_res) {
-      std::cerr << "WAL Recovery: Failed to create reader conveyor. Falling "
-                   "back to unbuffered.\n";
+    LARGE_INTEGER fileSize;
+    if (!GetFileSizeEx(file_.h, &fileSize)) {
+      std::cerr << "WAL: Failed to get file size. Error: " << GetLastError()
+                << "\n";
+      throw std::runtime_error("WAL: Failed to get file size");
     }
 
-    auto &reader = read_create_res.value();
     off_t offset = 0;
 
-    struct Buffered {
-      libconveyor::v2::Conveyor &r;
-      off_t &off;
-      std::vector<uint8_t> &buf;
+    if (fileSize.QuadPart > 0) {
+      // Initialize temporary Reader Conveyor for buffered recovery
+      libconveyor::v2::Config read_cfg;
+      read_cfg.handle = (storage_handle_t)file_.h;
+      read_cfg.ops = wal::WindowsStorage::get_ops();
+      read_cfg.write_capacity = 64 * 1024;
+      read_cfg.read_capacity = 10 * 1024 * 1024;
 
-      bool read(void *dest, size_t len, const char *ctx) {
-        buf.resize(len);
-        auto res = r.read(buf);
-        if (!res) {
-          std::cerr << "WAL Recovery [" << ctx
-                    << "]: Read error: " << res.error().message() << "\n";
-          return false;
-        }
-        if (res.value() != len) {
-          if (res.value() > 0) {
-            std::cerr << "WAL Recovery [" << ctx << "]: Partial read ("
-                      << res.value() << "/" << len << ")\n";
+      std::cout << "DEBUG: Creating reader conveyor..." << std::endl;
+      auto read_create_res = libconveyor::v2::Conveyor::create(read_cfg);
+
+      if (!read_create_res) {
+        std::cerr << "WAL Recovery: Failed to create reader conveyor: "
+                  << read_create_res.error().message()
+                  << ". Skipping recovery.\n";
+      } else {
+        std::cout << "DEBUG: Reader created." << std::endl;
+        auto &reader = read_create_res.value();
+
+        struct Buffered {
+          libconveyor::v2::Conveyor &r;
+          off_t &off;
+          std::vector<uint8_t> &buf;
+
+          bool read(void *dest, size_t len, const char *ctx) {
+            buf.resize(len);
+            auto res = r.read(buf);
+            if (!res) {
+              std::cerr << "WAL Recovery [" << ctx
+                        << "]: Read error: " << res.error().message() << "\n";
+              return false;
+            }
+            if (res.value() != len) {
+              if (res.value() == 0 && std::strcmp(ctx, "HEADER") == 0)
+                return false;
+              if (res.value() > 0) {
+                std::cerr << "WAL Recovery [" << ctx << "]: Partial read ("
+                          << res.value() << "/" << len << ")\n";
+              }
+              return false;
+            }
+            std::memcpy(dest, buf.data(), len);
+            off += (off_t)len;
+            return true;
           }
-          return false;
+        };
+
+        std::vector<uint8_t> read_buf;
+        Buffered b{reader, offset, read_buf};
+
+        std::cout << "DEBUG: Starting recovery loop..." << std::endl;
+        int loop_count = 0;
+        while (true) {
+          if (loop_count++ % 1000 == 0)
+            std::cout << "DEBUG: Loop " << loop_count << std::endl;
+          LogHeader h;
+          if (!b.read(&h, sizeof(h), "HEADER"))
+            break;
+
+          std::string key(h.key_len, '\0');
+          std::string payload(h.payload_len, '\0');
+
+          if (h.key_len > 0) {
+            if (!b.read(key.data(), h.key_len, "KEY")) {
+              std::cerr << "WAL Recovery: Truncated key at offset " << offset
+                        << "\n";
+              break;
+            }
+          }
+
+          if (h.payload_len > 0) {
+            if (!b.read(payload.data(), h.payload_len, "PAYLOAD")) {
+              std::cerr << "WAL Recovery: Truncated payload at offset "
+                        << offset << "\n";
+              break;
+            }
+          }
+
+          uint32_t computed = compute_crc(h.op, key, payload);
+          if (computed != h.crc) {
+            if (h.crc == 0 && computed != 0) {
+              std::cerr << "WAL WARNING: Zero CRC allowed for legacy.\n";
+            } else {
+              std::cerr << "WAL ERROR: CRC Mismatch at offset " << offset
+                        << ". Corrupt.\n";
+              break;
+            }
+          }
+          callback((WalOp)h.op, key, payload);
         }
-        std::memcpy(dest, buf.data(), len);
-        off += (off_t)len;
-        return true;
+        std::cout << "DEBUG: Recovery loop done. Offset: " << offset
+                  << std::endl;
       }
-    };
-
-    std::vector<uint8_t> read_buf;
-    Buffered b{reader, offset, read_buf};
-
-    while (true) {
-      LogHeader h;
-      if (!b.read(&h, sizeof(h), "HEADER"))
-        break;
-
-      std::string key(h.key_len, '\0');
-      std::string payload(h.payload_len, '\0');
-
-      if (h.key_len > 0) {
-        if (!b.read(key.data(), h.key_len, "KEY")) {
-          std::cerr << "WAL Recovery: Truncated key at offset " << offset
-                    << "\n";
-          break;
-        }
-      }
-
-      if (h.payload_len > 0) {
-        if (!b.read(payload.data(), h.payload_len, "PAYLOAD")) {
-          std::cerr << "WAL Recovery: Truncated payload at offset " << offset
-                    << "\n";
-          break;
-        }
-      }
-
-      uint32_t computed = compute_crc(h.op, key, payload);
-      if (computed != h.crc) {
-        if (h.crc == 0 && computed != 0) {
-          std::cerr << "WAL WARNING: Zero CRC allowed for legacy.\n";
-        } else {
-          std::cerr << "WAL ERROR: CRC Mismatch at offset "
-                    << offset - (off_t)sizeof(h) - (off_t)h.key_len -
-                           (off_t)h.payload_len
-                    << ". Transaction may be partial or corrupt.\n";
-          break;
-        }
-      }
-      callback((WalOp)h.op, key, payload);
+    } else {
+      std::cout << "DEBUG: WAL file is empty (Cold Start). Skipping recovery."
+                << std::endl;
     }
+
     std::cerr << "WAL Recovery: Completed at offset " << offset << "\n";
 
-    // Initialize Conveyor now that we are done reading
+    // Initialize Writer Conveyor
     libconveyor::v2::Config cfg;
     cfg.handle = (storage_handle_t)file_.h;
     cfg.ops = wal::WindowsStorage::get_ops();
-    cfg.write_capacity = 20 * 1024 * 1024; // 20MB
+    cfg.write_capacity = 20 * 1024 * 1024;
     cfg.read_capacity = 5 * 1024 * 1024;
 
+    std::cout << "DEBUG: Creating Writer Conveyor..." << std::endl;
     auto create_res = libconveyor::v2::Conveyor::create(cfg);
     if (!create_res)
       throw std::system_error(create_res.error());
     wal_ = std::make_unique<libconveyor::v2::Conveyor>(
         std::move(create_res.value()));
+    std::cout << "DEBUG: Writer Conveyor created." << std::endl;
 
-    // Seek to end to prepare for appending
     auto seek_res = wal_->seek(0, SEEK_END);
     if (!seek_res) {
       std::cerr << "WAL: Seeding failure: " << seek_res.error().message()
