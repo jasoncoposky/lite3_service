@@ -22,8 +22,15 @@ public:
   bool increment_node_splits() override;
   bool increment_hash_collisions() override;
 
+  bool record_bytes_received(size_t bytes) override;
+  bool record_bytes_sent(size_t bytes) override;
+  bool increment_active_connections() override;
+  bool decrement_active_connections() override;
+  bool record_error(int status_code) override;
+
   void dump_metrics() const;
   std::string get_metrics_string() const;
+  std::string get_json() const;
 
 private:
   struct OpStats {
@@ -42,6 +49,14 @@ private:
   std::atomic<size_t> buffer_capacity_{0};
   std::atomic<uint64_t> node_splits_{0};
   std::atomic<uint64_t> hash_collisions_{0};
+
+  std::atomic<size_t> bytes_received_{0};
+  std::atomic<size_t> bytes_sent_{0};
+  std::atomic<int64_t> active_connections_{0};
+
+  // Minimal error tracking: just a few buckets
+  std::atomic<uint64_t> errors_4xx_{0};
+  std::atomic<uint64_t> errors_5xx_{0};
 };
 
 #endif // SIMPLE_METRICS_HPP

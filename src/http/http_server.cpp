@@ -58,7 +58,15 @@ class session : public std::enable_shared_from_this<session> {
 
 public:
   session(tcp::socket &&socket, net::io_context &ioc, Engine &db)
-      : socket_(std::move(socket)), ioc_(ioc), db_(db) {}
+      : socket_(std::move(socket)), ioc_(ioc), db_(db) {
+    if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed))
+      m->increment_active_connections();
+  }
+
+  ~session() {
+    if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed))
+      m->decrement_active_connections();
+  }
 
   void run() { do_read(); }
 
@@ -72,6 +80,8 @@ private:
 
   void on_read(beast::error_code ec, std::size_t bytes_transferred) {
     boost::ignore_unused(bytes_transferred);
+    if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed))
+      m->record_bytes_received(bytes_transferred);
 
     if (ec == http::error::end_of_stream) {
       return do_close();
@@ -113,7 +123,37 @@ private:
       return res;
     };
 
+#include "dashboard.hpp"
+
+    // ... existing code ...
+
     std::string target(req_.target());
+
+    if (req_.method() == http::verb::get && target == "/dashboard") {
+      http::response<http::string_body> res{http::status::ok, req_.version()};
+      res.set(http::field::server, "Lite3");
+      res.set(http::field::content_type, "text/html");
+      res.body() = std::string(dashboard_html);
+      res.prepare_payload();
+      return send_response(std::move(res));
+    }
+
+    if (req_.method() == http::verb::get && target == "/metrics") {
+      http::response<http::string_body> res{http::status::ok, req_.version()};
+      res.set(http::field::server, "Lite3");
+      res.set(http::field::content_type, "application/json");
+
+      auto *m = lite3cpp::g_metrics.load(std::memory_order_acquire);
+      if (auto *sm = dynamic_cast<SimpleMetrics *>(m)) {
+        res.body() = sm->get_json();
+      } else {
+        res.body() = "{}"; // Should not happen
+      }
+
+      res.keep_alive(req_.keep_alive());
+      res.prepare_payload();
+      return send_response(std::move(res));
+    }
 
     if (req_.method() == http::verb::get && target == "/kv/health") {
       http::response<http::empty_body> res{http::status::ok, req_.version()};
@@ -228,6 +268,10 @@ private:
   template <class Body, class Allocator>
   void
   send_response(http::response<Body, http::basic_fields<Allocator>> &&res) {
+    if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed)) {
+      int status = static_cast<int>(res.result());
+      m->record_error(status);
+    }
     auto sp =
         std::make_shared<http::response<Body, http::basic_fields<Allocator>>>(
             std::move(res));
@@ -242,6 +286,8 @@ private:
   void on_write(beast::error_code ec, std::size_t bytes_transferred,
                 bool keep_alive) {
     boost::ignore_unused(bytes_transferred);
+    if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed))
+      m->record_bytes_sent(bytes_transferred);
 
     if (ec) {
       std::cerr << "write: " << ec.message() << "\n";

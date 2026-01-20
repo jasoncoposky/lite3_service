@@ -24,6 +24,27 @@ L3KV ensures data safety through a Write-Ahead Log (WAL).
     *   **Action:** The corrupted entry is **discarded**. The recovery process halts at the last valid entry.
     *   **Result:** The database effectively rolls back to the state immediately preceding the failed write. No partial or corrupted data is ever applied to the in-memory store.
 
+## 📊 Observability
+
+L3KV includes a comprehensive observability suite for real-time monitoring.
+
+### Dashboard
+A zero-dependency, real-time visual monitor is available at `/dashboard`.
+*   **Live Charts:** Visualizes throughput (bytes in/out) and write latency.
+*   **KPI Cards:** Tracks active connections, total errors (4xx/5xx), and current throughput.
+*   **Dark Mode:** Sleek, modern UI.
+
+[Access Dashboard](http://localhost:8080/dashboard)
+
+### Metrics API
+`GET /metrics` produces a JSON payload compatible with monitoring systems.
+```json
+{
+  "system": { "active_connections": 5 },
+  "throughput": { "bytes_received_total": 10240, "http_errors_4xx": 0 }
+}
+```
+
 ## 🛠️ Build & Run (Windows)
 
 ### Prerequisites
@@ -54,8 +75,10 @@ The service listens on port `8080` by default.
 | `PUT` | `/kv/{key}` | Store JSON document. |
 | `DELETE` | `/kv/{key}` | Delete document. |
 | `POST` | `/kv/{key}?op=set_int&field={path}&val={v}` | fast-path integer update. |
-| `GET` | `/kv/metrics` | View internal performance metrics. |
+| `GET` | `/metrics` | **(NEW)** Real-time JSON metrics. |
+| `GET` | `/dashboard` | **(NEW)** Visual Dashboard. |
 | `GET` | `/kv/health` | Health check (returns 200 OK). |
+| `GET` | `/kv/metrics` | (Deprecated) Legacy metrics text. |
 
 
 ## ⚡ Performance Metrics

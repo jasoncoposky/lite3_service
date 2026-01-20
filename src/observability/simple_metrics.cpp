@@ -110,3 +110,72 @@ std::string SimpleMetrics::get_metrics_string() const {
   ss << "================================\n";
   return ss.str();
 }
+
+bool SimpleMetrics::record_bytes_received(size_t bytes) {
+  bytes_received_.fetch_add(bytes, std::memory_order_relaxed);
+  return true;
+}
+
+bool SimpleMetrics::record_bytes_sent(size_t bytes) {
+  bytes_sent_.fetch_add(bytes, std::memory_order_relaxed);
+  return true;
+}
+
+bool SimpleMetrics::increment_active_connections() {
+  active_connections_.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+bool SimpleMetrics::decrement_active_connections() {
+  active_connections_.fetch_sub(1, std::memory_order_relaxed);
+  return true;
+}
+
+bool SimpleMetrics::record_error(int status_code) {
+  if (status_code >= 500) {
+    errors_5xx_.fetch_add(1, std::memory_order_relaxed);
+  } else if (status_code >= 400) {
+    errors_4xx_.fetch_add(1, std::memory_order_relaxed);
+  }
+  return true;
+}
+
+std::string SimpleMetrics::get_json() const {
+  std::lock_guard<std::mutex> lock(stats_mutex_);
+  std::stringstream ss;
+  ss << "{\n";
+  ss << "  \"system\": {\n";
+  ss << "    \"buffer_usage_bytes\": " << buffer_usage_.load() << ",\n";
+  ss << "    \"buffer_capacity_bytes\": " << buffer_capacity_.load() << ",\n";
+  ss << "    \"active_connections\": " << active_connections_.load() << ",\n";
+  ss << "    \"node_splits\": " << node_splits_.load() << ",\n";
+  ss << "    \"hash_collisions\": " << hash_collisions_.load() << "\n";
+  ss << "  },\n";
+  ss << "  \"throughput\": {\n";
+  ss << "    \"bytes_received_total\": " << bytes_received_.load() << ",\n";
+  ss << "    \"bytes_sent_total\": " << bytes_sent_.load() << ",\n";
+  ss << "    \"http_errors_4xx\": " << errors_4xx_.load() << ",\n";
+  ss << "    \"http_errors_5xx\": " << errors_5xx_.load() << "\n";
+  ss << "  },\n";
+  ss << "  \"operations\": {\n";
+
+  bool first = true;
+  for (const auto &[key, stats] : operation_stats_) {
+    if (!first)
+      ss << ",\n";
+    first = false;
+    uint64_t count = stats.count.load();
+    double total = stats.total_latency.load();
+    double max_lat = stats.max_latency.load();
+    double avg = count > 0 ? total / count : 0.0;
+
+    ss << "    \"" << key << "\": {\n";
+    ss << "      \"count\": " << count << ",\n";
+    ss << "      \"avg_latency_s\": " << avg << ",\n";
+    ss << "      \"max_latency_s\": " << max_lat << "\n";
+    ss << "    }";
+  }
+  ss << "\n  }\n";
+  ss << "}";
+  return ss.str();
+}
