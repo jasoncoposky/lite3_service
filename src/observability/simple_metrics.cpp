@@ -62,6 +62,10 @@ bool SimpleMetrics::increment_hash_collisions() {
   return true;
 }
 
+void SimpleMetrics::set_thread_count(int count) {
+  thread_count_.store(count, std::memory_order_relaxed);
+}
+
 void SimpleMetrics::dump_metrics() const {
   std::lock_guard<std::mutex> lock(stats_mutex_);
   std::cout << "\n=== Internal Service Metrics ===" << std::endl;
@@ -69,6 +73,7 @@ void SimpleMetrics::dump_metrics() const {
             << buffer_capacity_.load() << " bytes" << std::endl;
   std::cout << "Node Splits: " << node_splits_.load() << std::endl;
   std::cout << "Hash Collisions: " << hash_collisions_.load() << std::endl;
+  std::cout << "Thread Count: " << thread_count_.load() << std::endl;
   std::cout << "Operations:" << std::endl;
 
   for (const auto &[key, stats] : operation_stats_) {
@@ -94,6 +99,7 @@ std::string SimpleMetrics::get_metrics_string() const {
      << buffer_capacity_.load() << " bytes\n";
   ss << "Node Splits: " << node_splits_.load() << "\n";
   ss << "Hash Collisions: " << hash_collisions_.load() << "\n";
+  ss << "Thread Count: " << thread_count_.load() << "\n";
   ss << "Operations:\n";
 
   for (const auto &[key, stats] : operation_stats_) {
@@ -149,7 +155,8 @@ std::string SimpleMetrics::get_json() const {
   ss << "    \"buffer_capacity_bytes\": " << buffer_capacity_.load() << ",\n";
   ss << "    \"active_connections\": " << active_connections_.load() << ",\n";
   ss << "    \"node_splits\": " << node_splits_.load() << ",\n";
-  ss << "    \"hash_collisions\": " << hash_collisions_.load() << "\n";
+  ss << "    \"hash_collisions\": " << hash_collisions_.load() << ",\n";
+  ss << "    \"thread_count\": " << thread_count_.load() << "\n";
   ss << "  },\n";
   ss << "  \"throughput\": {\n";
   ss << "    \"bytes_received_total\": " << bytes_received_.load() << ",\n";
