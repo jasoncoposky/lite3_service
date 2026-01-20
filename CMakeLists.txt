@@ -42,7 +42,7 @@ target_link_libraries(l3svc PRIVATE
 )
 
 if(MSVC)
-    add_definitions(-D_WIN32_WINNT=0x0A00)
+    add_definitions(-D_WIN32_WINNT=0x0A00 -DNOMINMAX)
 endif()
 
 # Optimizations for zero-copy speed

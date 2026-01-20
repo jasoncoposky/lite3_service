@@ -1,0 +1,11 @@
+{
+    "server": {
+        "address": "0.0.0.0",
+        "port": 8080,
+        "min_threads": 4,
+        "max_threads": 16
+    },
+    "storage": {
+        "wal_path": "data.wal"
+    }
+}

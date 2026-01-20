@@ -27,6 +27,8 @@ public:
   bool increment_active_connections() override;
   bool decrement_active_connections() override;
   bool record_error(int status_code) override;
+  void set_thread_count(int count);
+  int get_active_connections() const { return active_connections_.load(); }
 
   void dump_metrics() const;
   std::string get_metrics_string() const;
@@ -57,6 +59,8 @@ private:
   // Minimal error tracking: just a few buckets
   std::atomic<uint64_t> errors_4xx_{0};
   std::atomic<uint64_t> errors_5xx_{0};
+
+  std::atomic<int> thread_count_{0};
 };
 
 #endif // SIMPLE_METRICS_HPP

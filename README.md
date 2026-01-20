@@ -3,26 +3,29 @@
 **L3KV** is a high-performance, persistent Key-Value service built on **Modern C++23** and the **Lite³** serialization library. It leverages zero-deserialization editing to modify large JSON documents in-place with microsecond latency.
 
 ## 🚀 Features
-* **Zero-Parse Mutations:** Update a single field in a 10MB document in **< 1 µs**.
-* **Zero-Copy Architecture:** Data stays in the buffer; no intermediate object trees.
-* **HTTP/1.1 Interface:** Standard REST API (`GET`, `PUT`, `DELETE`, `PATCH`).
-* **Observability:** Built-in metrics endpoint for latency and operation counts.
-* **Durability:** WAL-based persistence with CRC32 integrity checks.
+*   **Dynamic Scaling:** Predictive thread pool using a Kalman Filter to auto-scale resources.
+*   **Buffered Persistence:** Write-Ahead Log with **0 ms hot-path latency** (Buffered I/O).
+*   **Graceful Durability:** Guaranteed persistence on shutdown (`SIGINT`, `SIGTERM`).
+*   **Zero-Parse Mutations:** Update a single field in a 10MB document in **< 1 µs**.
+*   **Zero-Copy Architecture:** Data stays in the buffer; no intermediate object trees.
+*   **HTTP/1.1 Interface:** Standard REST API (`GET`, `PUT`, `DELETE`, `PATCH`).
+*   **Observability:** Built-in metrics endpoint and **HTML Dashboard**.
 
 ## 💾 Durability & Persistence
 
-L3KV ensures data safety through a Write-Ahead Log (WAL).
+L3KV uses a high-performance **Buffered Write-Ahead Log (WAL)**.
 
-*   **Write-Ahead Log:** Every mutation (`PUT`, `DELETE`, `PATCH`) is appended to `data.wal` before being applied to the in-memory state.
-*   **Crash Recovery:** On startup, the service replays the WAL to restore the dataset.
-*   **Integrity Verification:** Each WAL entry is protected by a CRC32 checksum. Corrupted entries (e.g., from partial writes during power loss) are detected during recovery to prevent data corruption.
-*   **Log Format:** Binary format with `[CRC32][OpType][KeyLen][PayloadLen][Key][Payload]`.
+*   **Fast Path:** Writes are appended to a 20MB in-memory buffer (`libconveyor`), achieving **0 ms latency** for the database engine.
+*   **Flush Policy:**
+    *   **Background:** The OS flushes dirty pages to disk asynchronously.
+    *   **Shutdown:** On receiving a signal (`SIGINT`, `SIGTERM`, `SIGBREAK`), the server forcefully flushes all buffers to `data.wal`.
+*   **Trade-off:**
+    *   **Graceful Shutdown:** 100% Data Durability GUARANTEED.
+    *   **Hard Crash / Power Loss:** Potential loss of buffered data (up to 20MB) that hasn't been flushed by the OS. The WAL integrity remains protected by CRC32, so no corruption occurs—only lost recent writes.
 
-### Failure Scenarios & Recovery
-*   **Power Loss / Crash during Write:** If the server is terminated while writing a log entry (e.g., partial payload written):
-    *   **Detection:** The recovery process detects either an `Unexpected EOF` (truncated entry) or a `CRC Mismatch` (corrupted entry).
-    *   **Action:** The corrupted entry is **discarded**. The recovery process halts at the last valid entry.
-    *   **Result:** The database effectively rolls back to the state immediately preceding the failed write. No partial or corrupted data is ever applied to the in-memory store.
+### Crash Recovery
+*   **Startup:** The service scans `data.wal` using a fast-read buffer.
+*   **Corrupt Entries:** Partial writes at the end of the log (from a hard crash) are detected via CRC32 mismatch and discarded, verifying the database to the last consistent state.
 
 ## 📊 Observability
 
@@ -40,7 +43,7 @@ A zero-dependency, real-time visual monitor is available at `/dashboard`.
 `GET /metrics` produces a JSON payload compatible with monitoring systems.
 ```json
 {
-  "system": { "active_connections": 5 },
+  "system": { "active_connections": 5, "thread_count": 8 },
   "throughput": { "bytes_received_total": 10240, "http_errors_4xx": 0 }
 }
 ```
@@ -62,10 +65,28 @@ cmake --build . --config Release --target l3svc
 ```
 
 ### Run
+### One-step Run
 ```powershell
-.\Release\l3svc.exe
+.\Release\l3svc.exe [config_path]
+# Defaults to config.json if not specified
 ```
-The service listens on port `8080` by default.
+Ensure `config.json` is present in the working directory or provide a path.
+
+#### Configuration (`config.json`)
+```json
+{
+  "server": {
+    "address": "0.0.0.0",
+    "port": 8080,
+    "min_threads": 4,
+    "max_threads": 16
+  },
+  "storage": {
+    "wal_path": "data.wal"
+  }
+}
+```
+The service listens on port `8080` (or as configured).
 
 ## 🔌 API Reference
 

@@ -114,12 +114,14 @@ constexpr char dashboard_html[] = R"HTML(<!DOCTYPE html>
                     <span class="metric-unit">B/s</span>
                 </div>
             </div>
-            <div class="card">
-                <h3>Throughput (Out)</h3>
                 <div>
                     <span class="metric-value" id="tx-val">0</span>
                     <span class="metric-unit">B/s</span>
                 </div>
+            </div>
+            <div class="card">
+                <h3>Thread Count</h3>
+                <div class="metric-value" style="color: var(--accent-blue)" id="thread-val">0</div>
             </div>
             <div class="card">
                 <h3>Errors (Rate)</h3>
@@ -241,6 +243,8 @@ async function fetchMetrics() {
     // Update DOM
     document.getElementById('conn-val').innerText =
         data.system.active_connections || 0;
+    document.getElementById('thread-val').innerText = 
+        data.system.thread_count || 0;
     document.getElementById('rx-val').innerText = rxRate.toLocaleString();
     document.getElementById('tx-val').innerText = txRate.toLocaleString();
     document.getElementById('err-val').innerText = errRate;
