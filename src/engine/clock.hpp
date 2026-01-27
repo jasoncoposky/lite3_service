@@ -1,0 +1,76 @@
+#ifndef L3KV_ENGINE_CLOCK_HPP
+#define L3KV_ENGINE_CLOCK_HPP
+
+#include <algorithm>
+#include <cstdint>
+#include <mutex>
+
+
+namespace l3kv {
+
+struct Timestamp {
+  int64_t wall_time; // Physical time (e.g., unix micros)
+  uint32_t logical;  // Logical counter
+  uint32_t node_id;  // Tie-breaker
+
+  // Comparison operators for total ordering
+  bool operator==(const Timestamp &o) const {
+    return wall_time == o.wall_time && logical == o.logical &&
+           node_id == o.node_id;
+  }
+  bool operator<(const Timestamp &o) const {
+    if (wall_time != o.wall_time)
+      return wall_time < o.wall_time;
+    if (logical != o.logical)
+      return logical < o.logical;
+    return node_id < o.node_id;
+  }
+  bool operator>(const Timestamp &o) const { return o < *this; }
+  bool operator<=(const Timestamp &o) const { return !(*this > o); }
+  bool operator>=(const Timestamp &o) const { return !(*this < o); }
+  bool operator!=(const Timestamp &o) const { return !(*this == o); }
+};
+
+class HybridLogicalClock {
+  mutable std::mutex mx_;
+  int64_t max_wall_time_{0};
+  uint32_t max_logical_{0};
+  uint32_t node_id_{0};
+
+public:
+  explicit HybridLogicalClock(uint32_t node_id) : node_id_(node_id) {}
+
+  // Get NOW (Send Event)
+  Timestamp now();
+
+  // Update with incoming timestamp (Receive Event)
+  void update(const Timestamp &incoming);
+
+  // For manual/test clock skew injection
+  // Reserve a batch of logical ticks for a specific physical timestamp.
+  // Returns the starting logical value for the batch.
+  // If 'for_phys_time' is older than current max_wall_time_, it returns -1
+  // (failure, retry). If successful, max_logical_ is incremented by 'count'.
+  int64_t reserve_logical(int64_t for_phys_time, int count);
+
+  uint32_t get_node_id() const { return node_id_; }
+};
+
+// Thread-local wrapper for high-throughput timestamp generation
+class ThreadLocalClock {
+  HybridLogicalClock *global_clock_;
+  int64_t cached_phys_time_{0};
+  uint32_t cached_logical_next_{0};
+  uint32_t cached_logical_end_{0}; // Exclusive
+
+public:
+  explicit ThreadLocalClock(HybridLogicalClock *global)
+      : global_clock_(global) {}
+
+  Timestamp now();
+  void update(const Timestamp &incoming) { global_clock_->update(incoming); }
+};
+
+} // namespace l3kv
+
+#endif
