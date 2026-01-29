@@ -1,6 +1,6 @@
 # L3KV: High-Performance Persistent Key-Value Store
 
-![L3KV Logo](l3kv_logo.jpg)
+![L3KV Logo](assets/l3kv_logo.jpg)
 
 **L3KV** is a high-performance, persistent Key-Value service built on **Modern C++23** and the **Lite³** serialization library. It leverages zero-deserialization editing to modify large JSON documents in-place with microsecond latency.
 
@@ -57,7 +57,7 @@ A zero-dependency, real-time visual monitor is available at `/dashboard`.
 
 [Access Dashboard](http://localhost:8080/dashboard)
  
-![Lite3 Service Dashboard](dashboard_screenshot.png)
+![Lite3 Service Dashboard](assets/dashboard_screenshot.png)
 
 ### Metrics API
 `GET /metrics` produces a JSON payload compatible with monitoring systems.
