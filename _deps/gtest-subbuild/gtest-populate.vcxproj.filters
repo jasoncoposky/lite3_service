@@ -1,0 +1,44 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="16.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\jason\playground\L3KV\_deps\gtest-subbuild\CMakeFiles\2f4e5d93a7ce90f6710e756ab672db87\gtest-populate-mkdir.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\jason\playground\L3KV\_deps\gtest-subbuild\CMakeFiles\2f4e5d93a7ce90f6710e756ab672db87\gtest-populate-download.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\jason\playground\L3KV\_deps\gtest-subbuild\CMakeFiles\2f4e5d93a7ce90f6710e756ab672db87\gtest-populate-update.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\jason\playground\L3KV\_deps\gtest-subbuild\CMakeFiles\2f4e5d93a7ce90f6710e756ab672db87\gtest-populate-patch.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\jason\playground\L3KV\_deps\gtest-subbuild\CMakeFiles\2f4e5d93a7ce90f6710e756ab672db87\gtest-populate-configure.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\jason\playground\L3KV\_deps\gtest-subbuild\CMakeFiles\2f4e5d93a7ce90f6710e756ab672db87\gtest-populate-build.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\jason\playground\L3KV\_deps\gtest-subbuild\CMakeFiles\2f4e5d93a7ce90f6710e756ab672db87\gtest-populate-install.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\jason\playground\L3KV\_deps\gtest-subbuild\CMakeFiles\2f4e5d93a7ce90f6710e756ab672db87\gtest-populate-test.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\jason\playground\L3KV\_deps\gtest-subbuild\CMakeFiles\52f5bc05eed968447d2005be77bdc007\gtest-populate-complete.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\jason\playground\L3KV\_deps\gtest-subbuild\CMakeFiles\cb9a161f98ed3e7a64f9fb6dba9b9510\gtest-populate.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\jason\playground\L3KV\_deps\gtest-subbuild\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="C:\Users\jason\playground\L3KV\_deps\gtest-subbuild\CMakeFiles\gtest-populate" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{40B3B81A-2A48-39C4-A254-0E108503166D}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

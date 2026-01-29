@@ -1,0 +1,12 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/jason/playground/L3KV/cmake_install.cmake",
+		"C:/Users/jason/playground/lib/lite3-cpp/build/cmake_install.cmake",
+		"C:/Users/jason/playground/L3KV/_deps/gtest-build/cmake_install.cmake",
+		"C:/Users/jason/playground/L3KV/_deps/gtest-build/googlemock/cmake_install.cmake",
+		"C:/Users/jason/playground/L3KV/_deps/gtest-build/googletest/cmake_install.cmake",
+		"C:/Users/jason/playground/lib/libconveyor/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,160 @@
+L3KV Geo-Replication Implementation Plan
+
+Scope: Transform L3KV from a single-node engine into a geo-distributed, multi-leader mesh.
+Target Architecture: Active-Active, Eventual Consistency, Field-Level Resolution.
+Reference: Designing Data-Intensive Applications, Ch. 5 & 8.
+
+Phase 1: The Timekeeping Layer (HLC)
+
+Before we can replicate data, we must define "when" an event happened. Physical clocks are insufficient for ordering events in a distributed system due to NTP drift and lack of causality.
+
+1.1 Implement HybridLogicalClock
+
+Component: src/engine/clock.hpp
+
+Logic: Implement the algorithm from Logical Physical Clocks and Consistent Snapshots in Globally Distributed Databases (Kulkarni et al.).
+
+State: <physical_time, logical_counter>
+
+Send Event: max(old_time, physical_time), increment counter.
+
+Receive Event: Update local time to max(local_time, remote_time, physical_time).
+
+Trade-off (Monotonicity vs. Truth): HLCs guarantee causality (if A causes B, B has a higher timestamp) but may drift slightly ahead of wall-clock time during high-load bursts. We accept this drift to prevent data loss during conflict resolution.
+
+1.2 Metadata Injection (Schema Augmentation)
+
+Component: src/engine/store.hpp (Blob class wrapper)
+
+Logic:
+
+Intercept every PUT and PATCH.
+
+Generate a new HLC timestamp.
+
+Inject: Using Lite³, insert/update a reserved field _ts (Map) inside the binary blob.
+
+Structure: _ts: { "score": <int64_hlc>, "name": <int64_hlc> }
+
+Trade-off (Storage vs. Complexity): We store per-field timestamps. This increases storage size (approx +8 bytes per field), but enables granular conflict resolution (merging two user edits) rather than "Last Doc Wins" (clobbering one user's edit).
+
+Phase 2: The Replication Transport (The Mesh)
+
+We need a mechanism to move data between regions without blocking the critical write path.
+
+2.1 The Replication Queue
+
+Component: src/engine/replication_log.hpp
+
+Design: A simplified libconveyor ringbuffer or a lock-free queue.
+
+Logic:
+
+The Engine::put/patch methods push an OpTuple to this queue after writing to the local WAL but before returning to the client (or asynchronously, depending on durability guarantees).
+
+OpTuple: { Key, Field, Value, HLC_Timestamp, Origin_Node_ID }
+
+Trade-off (Log Decoupling): We do not tail the disk WAL for replication. We use an in-memory queue. This reduces disk read pressure but risks replication lag if the node crashes before the memory queue is flushed to peers (mitigated by Anti-Entropy in Phase 4).
+
+2.2 The Mesh Connector (TCP/HTTP)
+
+Component: src/engine/mesh.cpp
+
+Design: Persistent TCP connections to defined Peer Nodes (e.g., config peers: ["us-east-1", "eu-west-1"]).
+
+Protocol: A compact binary stream.
+
+[Magic: 1b][MsgLen: 4b][HLC: 8b][KeyLen: 2b][Key][FieldLen: 2b][Field][Val...]
+
+Trade-off (Custom vs. HTTP): While the Client API is HTTP (for ease of use), the internal Mesh will use a custom binary format over TCP. This maximizes bandwidth efficiency across expensive WAN links.
+
+Phase 3: Conflict Resolution (The Merge Logic)
+
+This is the core "Business Logic" of the distributed system.
+
+3.1 The "Incoming" Handler
+
+Component: Engine::apply_replication_batch()
+
+Logic:
+
+Parse incoming OpTuple.
+
+HLC Update: Update local clock using OpTuple.HLC.
+
+Lookup: Fetch local Lite³ blob for Key.
+
+Check Metadata: Read _ts[Field] from the local blob.
+
+LWW Decision:
+
+if (Incoming.HLC > Local.HLC): APPLY. (Call lite3_set_*, update _ts).
+
+if (Incoming.HLC < Local.HLC): DROP. (Stale data).
+
+if (Equal): Compare Origin_Node_ID as tie-breaker.
+
+Trade-off (LWW vs. CRDT): We choose Last-Write-Wins (LWW).
+
+CRDTs (Conflict-free Replicated Data Types) are safer (never lose data) but require complex data structures (Vector Clocks) and more storage.
+
+LWW is simple and fast, but theoretically allows "lost updates" if timestamps are identical (rare with HLC). We accept this for performance.
+
+3.2 Tombstone Handling (Deletes)
+
+Logic:
+
+Client calls DELETE key.
+
+Engine does not free the memory.
+
+Engine sets Lite³ field _deleted = true and _ts["_deleted"] = Now().
+
+Replication propagates this update.
+
+Trade-off (Memory vs. Correctness): Deleted keys consume memory until GC runs. This is necessary to prevent "Zombie Objects" (where a node that missed the delete re-replicates the old data back to the cluster).
+
+Phase 4: Anti-Entropy (Background Repair)
+
+TCP drops, nodes restart, and queues overflow. We need a mechanism to ensure eventual consistency when the stream fails.
+
+4.1 Merkle Tree Implementation
+
+Component: src/engine/merkle.hpp
+
+Logic:
+
+Maintain a static 256-ary Merkle Tree representing the key space hash.
+
+Updates to Key invalidate the leaf hash and bubble up to the Root.
+
+Protocol:
+
+Every 30 seconds, Node A sends GetRootHash to Node B.
+
+If RootA != RootB:
+
+Request Level 1 hashes.
+
+Find mismatching bucket.
+
+Stream all keys in that bucket to the peer.
+
+Trade-off (Compute vs. Bandwidth): Recomputing Merkle hashes on every write is CPU intensive. We will use a "Dirty Flag" approach: Mark buckets dirty on write, and recompute hashes only when the Anti-Entropy thread wakes up. This saves CPU at the cost of slight delay in repair readiness.
+
+Summary of Architectural Choices
+
+Topology: Mesh. No central coordinator. High Availability.
+
+Conflict Strategy: Field-Level LWW. Preserves non-overlapping edits.
+
+Clock: HLC. Captures causality better than NTP.
+
+Transport: Binary TCP. Optimized for WAN throughput.
+
+ i'd like to review the performance implications of the geo replication plan, and consider any mitigations to performance impact.
+
+This is the most critical engineering review we will do. We are taking a system designed for nanosecond-level pointer arithmetic (Lite³) and adding a distributed systems layer that typically operates in milliseconds.If we implement the Geo-Replication plan naively, we risk destroying the "Zero-Parse" performance advantage.Here is the deep-dive performance analysis and the specific mitigations we must engineer.1. The "Metadata Explosion" RiskThe Problem:In the design, we proposed injecting _ts (timestamps) inside the user's document.User Data: {"score": 500} (approx 12 bytes)With Metadata: {"score": 500, "_ts": {"score": 167888849200001}} (approx 50+ bytes)Performance Hit:Write Amplification: Your storage footprint grows by 200-300% for small objects.Mutation Drag: Lite³ is fastest when overwriting existing bytes. If you add a new field (timestamp) on the first write, you trigger a B-Tree Node Split or a buffer resize (realloc). This kills the "Zero-Allocation" guarantee of the PMR pool.Mitigation: "Sidecar" Metadata (Parallel Storage)Do not pollute the user's Lite³ blob. Store metadata in a separate, parallel structure.User Key: user:100 -> Points to Blob A (Pure user data).Meta Key: user:100:meta -> Points to Blob B (Timestamps).Why this saves performance:Reads (GET): 99% of traffic is Reads. We serve Blob A directly. Zero overhead. We don't need to parse/strip _ts.Writes (PUT): We write to Blob A (fast). We asynchronously update Blob B (or update it in the same lock scope).Conflict: We only load Blob B when a replication conflict actually happens.2. The HLC "Hot Path" ContentionThe Problem:Every write operation needs a timestamp.HLC::now() usually involves a std::atomic Compare-And-Swap (CAS) loop or a mutex to ensure the logical counter increments monotonically across threads.In a 64-core system, a single atomic variable becomes a cache-line ping-pong bottleneck.Mitigation: Thread-Local Clock BatchesInstead of hitting the global atomic for every single request:Each Worker Thread maintains a Thread-Local HLC.It syncs with the Global HLC only every 10ms or when it receives a message with a higher timestamp.Result: Lock-free timestamp generation for 99.9% of requests.3. The "Replication Lag" LoopThe Problem:Receiving replication events is CPU intensive.Node A sends 50,000 ops/sec to Node B.Node B has to: Deserialize -> Fetch Local Blob -> Fetch Meta Blob -> Compare Int64s -> Write Blob.This "Apply" thread competes for locks with the "User" threads.Mitigation: Batched Application & Read-RepairBatching: Do not apply replication ops one by one. Group them by Shard ID. Lock the Shard once, apply 500 remote updates, then unlock.Optimistic "Blind" Writes:If the incoming timestamp is very new (e.g., > 1 minute ahead of local data creation), skip the comparison check. It is almost certainly the winner. (Risky, but fast).Priority Queueing: Give "User Writes" priority over "Replication Writes" on the Shard mutex. It is better to have 100ms replication lag than to block a user for 100ms.4. Anti-Entropy (Merkle) CPU CostThe Problem:Computing Merkle Trees requires hashing every key.If we recompute the hash of user:100 every time it changes, we burn CPU cycles hashing data that might never be compared.Mitigation: "Dirty Bucket" StrategyDo not update the Merkle Tree on the write path.Set a simple bit flag: Bucket[42].is_dirty = true.The Anti-Entropy thread wakes up every 30s. It sees Bucket[42] is dirty. Only then does it scan the keys and recompute the hash.Benefit: Absorbs high-frequency updates. If user:100 updates 50 times in a second, we calculate the hash once, not 50 times.5. TCP "Head-of-Line" BlockingThe Problem:If we use a single TCP connection between NY and London, one large 10MB document replication can block thousands of tiny "score update" messages behind it.Mitigation: Multi-Lane HighwayOpen 4 TCP sockets per region pair.Lane 1 (Express): Small payloads (< 1KB).Lane 2 (Standard): Medium payloads.Lane 3 (Heavy): Large blobs (> 1MB).Lane 4 (Control): Heartbeats / Merkle Exchanges.This ensures a massive document upload doesn't stall the latency-sensitive metadata updates.Summary of Performance ImpactComponentUnmitigated CostMitigated CostMetadataHigh (Resize/Copy on write)Zero on Read / Low on Write (Sidecar)TimekeepingMedium (Atomic contention)Zero (Thread-local HLC)Conflict CheckHigh (Lock contention)Low (Batched Shard Locking)Anti-EntropyHigh (Continuous Hashing)Low (Lazy "Dirty" Hashing)NetworkMedium (TCP Blocking)Low (Multi-Lane Sockets)By implementing the Sidecar Metadata and Multi-Lane Networking, we preserve the core value proposition of L3KV—speed—while gaining the resilience of a distributed system.
+
+
+

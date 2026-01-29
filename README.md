@@ -56,6 +56,8 @@ A zero-dependency, real-time visual monitor is available at `/dashboard`.
 *   **Dark Mode:** Sleek, modern UI.
 
 [Access Dashboard](http://localhost:8080/dashboard)
+ 
+![Lite3 Service Dashboard](dashboard_screenshot.png)
 
 ### Metrics API
 `GET /metrics` produces a JSON payload compatible with monitoring systems.

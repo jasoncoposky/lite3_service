@@ -206,9 +206,8 @@ std::string SimpleMetrics::get_json() const {
     ss << "      \"max_latency_s\": " << max_lat << "\n";
     ss << "    }";
   }
-  ss << "\n  }\n";
-  ss << "}";
-  ss << ",\n  \"replication\": {\n";
+  ss << "\n  },\n";
+  ss << "  \"replication\": {\n";
   ss << "    \"keys_repaired\": " << keys_repaired_.load() << ",\n";
   ss << "    \"sync_ops\": {\n";
   bool first_sync = true;

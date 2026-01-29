@@ -36,6 +36,7 @@ add_executable(l3svc
     src/http/http_server.cpp
     src/observability/simple_metrics.cpp
     src/engine/clock.cpp
+    src/engine/mesh.cpp
 )
 
 # Set include directories for l3svc (must be AFTER add_executable)

@@ -26,7 +26,15 @@ public:
   Connection(boost::asio::ip::tcp::socket socket, Mesh *mesh)
       : socket_(std::move(socket)), mesh_(mesh) {}
 
-  void start() { do_read_header(); }
+  void start(bool is_outbound, NodeID local_id) {
+    if (is_outbound) {
+      do_send_id(local_id);
+    } else {
+      do_read_id();
+    }
+  }
+
+  void on_identified(std::function<void(NodeID)> cb) { on_id_ = cb; }
 
   void send(std::vector<uint8_t> payload) {
     boost::asio::post(
@@ -45,9 +53,38 @@ public:
 private:
   boost::asio::ip::tcp::socket socket_;
   Mesh *mesh_;
+  NodeID peer_id_ = 0;
+  std::function<void(NodeID)> on_id_;
   std::vector<uint8_t> read_buffer_; // For body
   uint32_t header_buffer_[2];        // [0]=Lane, [1]=Size
+  uint32_t handshake_id_ = 0;
   std::deque<std::vector<uint8_t>> outbox_;
+
+  void do_send_id(NodeID my_id) {
+    auto self(shared_from_this());
+    handshake_id_ = my_id;
+    boost::asio::async_write(
+        socket_, boost::asio::buffer(&handshake_id_, 4),
+        [this, self](boost::system::error_code ec, std::size_t) {
+          if (!ec) {
+            do_read_header();
+          }
+        });
+  }
+
+  void do_read_id() {
+    auto self(shared_from_this());
+    boost::asio::async_read(
+        socket_, boost::asio::buffer(&handshake_id_, 4),
+        [this, self](boost::system::error_code ec, std::size_t) {
+          if (!ec) {
+            peer_id_ = handshake_id_;
+            if (on_id_)
+              on_id_(peer_id_);
+            do_read_header();
+          }
+        });
+  }
 
   void do_read_header() {
     auto self(shared_from_this());
@@ -135,8 +172,24 @@ void Mesh::do_accept() {
     if (!ec) {
       // New Incoming Connection
       auto conn = std::make_shared<Connection>(std::move(socket), this);
-      conn->start();
-      // We don't know PeerID yet until handshake. Store in temp?
+      conn->on_identified([this, conn](NodeID pid) {
+        std::lock_guard<std::mutex> lock(peers_mx_);
+        if (peers_.find(pid) == peers_.end()) {
+          auto peer = std::make_shared<Peer>();
+          peer->id = pid;
+          peer->conn = conn;
+          peers_[pid] = peer;
+          std::cout << "[Mesh] Registered incoming peer " << pid << std::endl;
+        } else {
+          // If we already have a connection, should we replace it?
+          // Or keep ours if we are "senior"?
+          // For MVP: Replace.
+          peers_[pid]->conn = conn;
+          std::cout << "[Mesh] Updated connection for peer " << pid
+                    << std::endl;
+        }
+      });
+      conn->start(false, my_id_);
     }
     do_accept();
   });
@@ -150,7 +203,7 @@ void Mesh::connect(NodeID peer_id, const std::string &host, int port) {
   boost::asio::connect(socket, endpoints);
 
   auto conn = std::make_shared<Connection>(std::move(socket), this);
-  conn->start();
+  conn->start(true, my_id_);
 
   std::lock_guard<std::mutex> lock(peers_mx_);
   auto peer = std::make_shared<Peer>();

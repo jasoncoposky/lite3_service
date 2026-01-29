@@ -129,6 +129,13 @@ constexpr char dashboard_html[] = R"HTML(<!DOCTYPE html>
                 <h3>Errors (Rate)</h3>
                 <div class="metric-value" style="color: var(--accent-red)" id="err-val">0</div>
             </div>
+            <div class="card">
+                <h3>Write Latency</h3>
+                <div>
+                    <span class="metric-value" style="color: var(--accent-green)" id="latency-val">0</span>
+                    <span class="metric-unit">ms</span>
+                </div>
+            </div>
         </div>
 
         <!-- Replication Cards -->
@@ -208,7 +215,7 @@ constexpr char dashboard_html[] = R"HTML(<!DOCTYPE html>
                 ctx.clearRect(0, 0, w, h);
 
                 // Auto-scale
-                const max = Math.max(...this.data, 10); // Min scale 10
+                const max = Math.max(...this.data, 0.001); // Min scale 1us for visibility
 
                 // Draw Grid
                 ctx.strokeStyle = '#334155';
@@ -244,7 +251,7 @@ constexpr char dashboard_html[] = R"HTML(<!DOCTYPE html>
                 // Draw Max Label
                 ctx.fillStyle = '#94a3b8';
                 ctx.font = '10px monospace';
-                ctx.fillText(max.toFixed(1), 0, 10);
+                ctx.fillText(max.toFixed(4), 0, 10);
             }
         }
 
@@ -322,6 +329,10 @@ constexpr char dashboard_html[] = R"HTML(<!DOCTYPE html>
                 document.getElementById('sync-ops-val').innerText = syncOps.toLocaleString();
                 document.getElementById('mesh-rx-val').innerText = meshRxRate.toLocaleString();
                 document.getElementById('mesh-tx-val').innerText = meshTxRate.toLocaleString();
+
+                // Update DOM - Latency
+                const currentSetLat = (data.operations && data.operations.set) ? data.operations.set.avg_latency_s * 1000 : 0;
+                document.getElementById('latency-val').innerText = currentSetLat.toFixed(4);
 
                 // Update Charts
                 trafficChart.push(rxRate + txRate);
