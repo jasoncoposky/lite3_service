@@ -146,6 +146,30 @@ bool SimpleMetrics::record_error(int status_code) {
   return true;
 }
 
+bool SimpleMetrics::increment_sync_ops(std::string_view type) {
+  std::string key(type);
+  std::lock_guard<std::mutex> lock(stats_mutex_);
+  sync_stats_[key].count.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+bool SimpleMetrics::increment_keys_repaired() {
+  keys_repaired_.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+bool SimpleMetrics::increment_mesh_bytes(std::string_view lane, size_t bytes,
+                                         bool is_send) {
+  std::string key(lane);
+  std::lock_guard<std::mutex> lock(stats_mutex_);
+  if (is_send) {
+    lane_stats_[key].sent.fetch_add(bytes, std::memory_order_relaxed);
+  } else {
+    lane_stats_[key].recv.fetch_add(bytes, std::memory_order_relaxed);
+  }
+  return true;
+}
+
 std::string SimpleMetrics::get_json() const {
   std::lock_guard<std::mutex> lock(stats_mutex_);
   std::stringstream ss;
@@ -183,6 +207,29 @@ std::string SimpleMetrics::get_json() const {
     ss << "    }";
   }
   ss << "\n  }\n";
+  ss << "}";
+  ss << ",\n  \"replication\": {\n";
+  ss << "    \"keys_repaired\": " << keys_repaired_.load() << ",\n";
+  ss << "    \"sync_ops\": {\n";
+  bool first_sync = true;
+  for (const auto &[key, stats] : sync_stats_) {
+    if (!first_sync)
+      ss << ",\n";
+    first_sync = false;
+    ss << "      \"" << key << "\": " << stats.count.load();
+  }
+  ss << "\n    },\n";
+  ss << "    \"mesh_traffic\": {\n";
+  bool first_lane = true;
+  for (const auto &[key, stats] : lane_stats_) {
+    if (!first_lane)
+      ss << ",\n";
+    first_lane = false;
+    ss << "      \"" << key << "\": { \"sent\": " << stats.sent.load()
+       << ", \"recv\": " << stats.recv.load() << " }";
+  }
+  ss << "\n    }\n";
+  ss << "  }\n";
   ss << "}";
   return ss.str();
 }

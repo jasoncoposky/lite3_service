@@ -114,6 +114,8 @@ constexpr char dashboard_html[] = R"HTML(<!DOCTYPE html>
                     <span class="metric-unit">B/s</span>
                 </div>
             </div>
+            <div class="card">
+                <h3>Throughput (Out)</h3>
                 <div>
                     <span class="metric-value" id="tx-val">0</span>
                     <span class="metric-unit">B/s</span>
@@ -125,151 +127,216 @@ constexpr char dashboard_html[] = R"HTML(<!DOCTYPE html>
             </div>
             <div class="card">
                 <h3>Errors (Rate)</h3>
-                <div class="metric-value" style="color: var(--accent-red)" id =
-    "err-val" > 0 < / div > </ div></ div>
+                <div class="metric-value" style="color: var(--accent-red)" id="err-val">0</div>
+            </div>
+        </div>
 
-    <!--Charts--><div class = "charts-container"><div class = "card">
-    <h3> Network Traffic(B / s)</ h3><canvas id = "trafficChart"></ canvas>
-    </ div><div class = "card"><h3> Avg Write
-    Latency(ms)</ h3><canvas id = "latencyChart"></ canvas></ div></ div></ div>
+        <!-- Replication Cards -->
+        <h2 style="font-weight: 300; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 10px;">Replication</h2>
+        <div class="grid">
+            <div class="card">
+                <h3>Keys Repaired</h3>
+                <div class="metric-value" style="color: var(--accent-green)" id="rep-keys-val">0</div>
+            </div>
+            <div class="card">
+                <h3>Sync Events</h3>
+                <div class="metric-value" style="color: var(--accent-blue)" id="sync-ops-val">0</div>
+            </div>
+            <div class="card">
+                <h3>Mesh Traffic (In)</h3>
+                <div>
+                    <span class="metric-value" id="mesh-rx-val">0</span>
+                    <span class="metric-unit">B/s</span>
+                </div>
+            </div>
+            <div class="card">
+                <h3>Mesh Traffic (Out)</h3>
+                <div>
+                    <span class="metric-value" id="mesh-tx-val">0</span>
+                    <span class="metric-unit">B/s</span>
+                </div>
+            </div>
+        </div>
 
-    <script> const SAMPLE_SIZE = 60;
-const POLL_INTERVAL = 1000;
+        <!-- Charts -->
+        <div class="charts-container">
+            <div class="card">
+                <h3>Network Traffic (B/s)</h3>
+                <canvas id="trafficChart"></canvas>
+            </div>
+            <div class="card">
+                <h3>Avg Write Latency (ms)</h3>
+                <canvas id="latencyChart"></canvas>
+            </div>
+        </div>
+    </div>
 
-// Simple Chart Implementation (Zero Dependency)
-class LineChart {
-  constructor(canvasId, color) {
-    this.canvas = document.getElementById(canvasId);
-    this.ctx = this.canvas.getContext('2d');
-    this.data = new Array(SAMPLE_SIZE).fill(0);
-    this.color = color;
+    <script>
+        const SAMPLE_SIZE = 60;
+        const POLL_INTERVAL = 1000;
 
-    // Handle DPI
-    const dpr = window.devicePixelRatio || 1;
-    const rect = this.canvas.getBoundingClientRect();
-    this.canvas.width = rect.width * dpr;
-    this.canvas.height = rect.height * dpr;
-    this.ctx.scale(dpr, dpr);
-    this.width = rect.width;
-    this.height = rect.height;
-  }
+        // Simple Chart Implementation (Zero Dependency)
+        class LineChart {
+            constructor(canvasId, color) {
+                this.canvas = document.getElementById(canvasId);
+                this.ctx = this.canvas.getContext('2d');
+                this.data = new Array(SAMPLE_SIZE).fill(0);
+                this.color = color;
 
-  push(value) {
-    this.data.shift();
-    this.data.push(value);
-    this.draw();
-  }
+                // Handle DPI
+                const dpr = window.devicePixelRatio || 1;
+                const rect = this.canvas.getBoundingClientRect();
+                this.canvas.width = rect.width * dpr;
+                this.canvas.height = rect.height * dpr;
+                this.ctx.scale(dpr, dpr);
+                this.width = rect.width;
+                this.height = rect.height;
+            }
 
-  draw() {
-    const ctx = this.ctx;
-    const w = this.width;
-    const h = this.height;
-    const pad = 20;
+            push(value) {
+                this.data.shift();
+                this.data.push(value);
+                this.draw();
+            }
 
-    ctx.clearRect(0, 0, w, h);
+            draw() {
+                const ctx = this.ctx;
+                const w = this.width;
+                const h = this.height;
+                const pad = 20;
 
-    // Auto-scale
-    const max = Math.max(... this.data, 10); // Min scale 10
+                ctx.clearRect(0, 0, w, h);
 
-    // Draw Grid
-    ctx.strokeStyle = '#334155';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(pad, h - pad);
-    ctx.lineTo(w, h - pad); // X-axis
-    ctx.stroke();
+                // Auto-scale
+                const max = Math.max(...this.data, 10); // Min scale 10
 
-    // Draw Line
-    ctx.strokeStyle = this.color;
-    ctx.lineWidth = 2;
-    ctx.lineJoin = 'round';
-    ctx.beginPath();
+                // Draw Grid
+                ctx.strokeStyle = '#334155';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(pad, h - pad);
+                ctx.lineTo(w, h - pad); // X-axis
+                ctx.stroke();
 
-    const step = (w - pad) / (SAMPLE_SIZE - 1);
+                // Draw Line
+                ctx.strokeStyle = this.color;
+                ctx.lineWidth = 2;
+                ctx.lineJoin = 'round';
+                ctx.beginPath();
 
-    this.data.forEach((val, i) = > {
-      const x = pad + (i * step);
-      const y = (h - pad) - ((val / max) * (h - 2 * pad));
-      if (i == = 0)
-        ctx.moveTo(x, y);
-      else
-        ctx.lineTo(x, y);
-    });
+                const step = (w - pad) / (SAMPLE_SIZE - 1);
 
-    ctx.stroke();
+                this.data.forEach((val, i) => {
+                    const x = pad + (i * step);
+                    const y = (h - pad) - ((val / max) * (h - 2 * pad));
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
 
-    // Fill area
-    ctx.fillStyle = this.color + '20'; // 20% opacity
-    ctx.lineTo(w, h - pad);
-    ctx.lineTo(pad, h - pad);
-    ctx.fill();
+                ctx.stroke();
 
-    // Draw Max Label
-    ctx.fillStyle = '#94a3b8';
-    ctx.font = '10px monospace';
-    ctx.fillText(max.toFixed(1), 0, 10);
-  }
-}
+                // Fill area
+                ctx.fillStyle = this.color + '20'; // 20% opacity
+                ctx.lineTo(w, h - pad);
+                ctx.lineTo(pad, h - pad);
+                ctx.fill();
 
-const trafficChart = new LineChart('trafficChart', '#38bdf8');
-const latencyChart = new LineChart('latencyChart', '#4ade80');
+                // Draw Max Label
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '10px monospace';
+                ctx.fillText(max.toFixed(1), 0, 10);
+            }
+        }
 
-let lastRx = 0;
-let lastTx = 0;
-let lastErr = 0;
-let firstRun = true;
+        const trafficChart = new LineChart('trafficChart', '#38bdf8');
+        const latencyChart = new LineChart('latencyChart', '#4ade80');
 
-async function fetchMetrics() {
-  try {
-    const res = await fetch('/metrics');
-    const data = await res.json();
+        let lastRx = 0;
+        let lastTx = 0;
+        let lastErr = 0;
+        
+        let lastMeshRx = 0;
+        let lastMeshTx = 0;
+        
+        let firstRun = true;
 
-    // Current totals
-    const rx = data.throughput.bytes_received_total || 0;
-    const tx = data.throughput.bytes_sent_total || 0;
-    const err = (data.throughput.http_errors_4xx || 0) +
-                (data.throughput.http_errors_5xx || 0);
+        async function fetchMetrics() {
+            try {
+                const res = await fetch('/metrics');
+                const data = await res.json();
 
-    // Calculate deltas (rates per second)
-    const rxRate = firstRun ? 0 : rx - lastRx;
-    const txRate = firstRun ? 0 : tx - lastTx;
-    const errRate = firstRun ? 0 : err - lastErr;
+                // Current totals
+                const rx = data.throughput.bytes_received_total || 0;
+                const tx = data.throughput.bytes_sent_total || 0;
+                const err = (data.throughput.http_errors_4xx || 0) + (data.throughput.http_errors_5xx || 0);
 
-    lastRx = rx;
-    lastTx = tx;
-    lastErr = err;
-    firstRun = false;
+                // Replication totals
+                let meshRx = 0;
+                let meshTx = 0;
+                let syncOps = 0;
+                let keysRepaired = 0;
 
-    // Update DOM
-    document.getElementById('conn-val').innerText =
-        data.system.active_connections || 0;
-    document.getElementById('thread-val').innerText = 
-        data.system.thread_count || 0;
-    document.getElementById('rx-val').innerText = rxRate.toLocaleString();
-    document.getElementById('tx-val').innerText = txRate.toLocaleString();
-    document.getElementById('err-val').innerText = errRate;
+                if (data.replication) {
+                    keysRepaired = data.replication.keys_repaired || 0;
+                    
+                    if (data.replication.mesh_traffic) {
+                        for (const lane in data.replication.mesh_traffic) {
+                            meshRx += data.replication.mesh_traffic[lane].recv || 0;
+                            meshTx += data.replication.mesh_traffic[lane].sent || 0;
+                        }
+                    }
+                    
+                    if (data.replication.sync_ops) {
+                        for (const op in data.replication.sync_ops) {
+                            syncOps += data.replication.sync_ops[op] || 0;
+                        }
+                    }
+                }
 
-    // Update Charts
-    trafficChart.push(rxRate + txRate);
+                // Calculate deltas (rates per second)
+                const rxRate = firstRun ? 0 : rx - lastRx;
+                const txRate = firstRun ? 0 : tx - lastTx;
+                const errRate = firstRun ? 0 : err - lastErr;
+                
+                const meshRxRate = firstRun ? 0 : meshRx - lastMeshRx;
+                const meshTxRate = firstRun ? 0 : meshTx - lastMeshTx;
 
-    // Latency (Operations set)
-    // Note: SimpleMetrics gives average of ALL calls, not instantaneous
-    // interval. For a proper chart we'd need interval stats, but for now we'll
-    // plot the cumulative average or just wiggle it to show activity if we had
-    // interval data. Let's use avg_latency_s from 'set' operation if available
-    const setLat =
-        data.operations.set ? data.operations.set.avg_latency_s * 1000 : 0;
-    latencyChart.push(setLat);
+                lastRx = rx;
+                lastTx = tx;
+                lastErr = err;
+                
+                lastMeshRx = meshRx;
+                lastMeshTx = meshTx;
 
-  } catch (e) {
-    console.error("Fetch failed", e);
-  }
-}
+                firstRun = false;
 
-setInterval(fetchMetrics, POLL_INTERVAL);
-fetchMetrics();
-    </script>
-</body>
+                // Update DOM - System
+                document.getElementById('conn-val').innerText = data.system.active_connections || 0;
+                document.getElementById('thread-val').innerText = data.system.thread_count || 0;
+                document.getElementById('rx-val').innerText = rxRate.toLocaleString();
+                document.getElementById('tx-val').innerText = txRate.toLocaleString();
+                document.getElementById('err-val').innerText = errRate;
+
+                // Update DOM - Replication
+                document.getElementById('rep-keys-val').innerText = keysRepaired.toLocaleString();
+                document.getElementById('sync-ops-val').innerText = syncOps.toLocaleString();
+                document.getElementById('mesh-rx-val').innerText = meshRxRate.toLocaleString();
+                document.getElementById('mesh-tx-val').innerText = meshTxRate.toLocaleString();
+
+                // Update Charts
+                trafficChart.push(rxRate + txRate);
+
+                // Latency (Operations set)
+                const setLat = (data.operations && data.operations.set) ? data.operations.set.avg_latency_s * 1000 : 0;
+                latencyChart.push(setLat);
+
+            } catch (e) {
+                console.error("Fetch failed", e);
+            }
+        }
+
+        setInterval(fetchMetrics, POLL_INTERVAL);
+        fetchMetrics();
     </script>
 </body>
 </html>)HTML";

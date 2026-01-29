@@ -20,7 +20,9 @@
 #include <thread>
 #include <vector>
 
+namespace l3kv {
 class Engine;
+}
 
 namespace http_server {
 
@@ -31,7 +33,7 @@ using tcp = net::ip::tcp;
 
 class http_server {
 public:
-  http_server(Engine &db, std::string address, unsigned short port,
+  http_server(l3kv::Engine &db, std::string address, unsigned short port,
               int min_threads = 4, int max_threads = 16);
   void run();
   void stop();
@@ -53,7 +55,7 @@ private:
   net::io_context ioc_;
   net::signal_set signals_;
   tcp::acceptor acceptor_;
-  Engine &db_;
+  l3kv::Engine &db_;
 
   int min_threads_;
   int max_threads_;

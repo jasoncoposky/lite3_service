@@ -1,0 +1,219 @@
+#include "mesh.hpp"
+#include "observability.hpp"
+#include <deque>
+#include <iostream>
+#include <thread>
+
+namespace l3kv {
+
+static std::string lane_to_string(Lane l) {
+  switch (l) {
+  case Lane::Control:
+    return "control";
+  case Lane::Express:
+    return "express";
+  case Lane::Standard:
+    return "standard";
+  case Lane::Heavy:
+    return "heavy";
+  }
+  return "unknown";
+}
+
+// Internal connection handler
+class Mesh::Connection : public std::enable_shared_from_this<Connection> {
+public:
+  Connection(boost::asio::ip::tcp::socket socket, Mesh *mesh)
+      : socket_(std::move(socket)), mesh_(mesh) {}
+
+  void start() { do_read_header(); }
+
+  void send(std::vector<uint8_t> payload) {
+    boost::asio::post(
+        socket_.get_executor(),
+        [self = shared_from_this(), p = std::move(payload)]() mutable {
+          bool write_in_progress = !self->outbox_.empty();
+          self->outbox_.push_back(std::move(p));
+          if (!write_in_progress) {
+            self->do_write();
+          }
+        });
+  }
+
+  boost::asio::ip::tcp::socket &socket() { return socket_; }
+
+private:
+  boost::asio::ip::tcp::socket socket_;
+  Mesh *mesh_;
+  std::vector<uint8_t> read_buffer_; // For body
+  uint32_t header_buffer_[2];        // [0]=Lane, [1]=Size
+  std::deque<std::vector<uint8_t>> outbox_;
+
+  void do_read_header() {
+    auto self(shared_from_this());
+    boost::asio::async_read(
+        socket_, boost::asio::buffer(header_buffer_, sizeof(header_buffer_)),
+        [this, self](boost::system::error_code ec, std::size_t /*length*/) {
+          if (!ec) {
+            uint32_t lane = header_buffer_[0];
+            uint32_t size = header_buffer_[1];
+            do_read_body(lane, size);
+          } else {
+            // Handle close/error
+          }
+        });
+  }
+
+  void do_read_body(uint32_t lane, uint32_t size) {
+    auto self(shared_from_this());
+    read_buffer_.resize(size);
+    boost::asio::async_read(
+        socket_, boost::asio::buffer(read_buffer_),
+        [this, self, lane, size](boost::system::error_code ec,
+                                 std::size_t /*length*/) {
+          if (!ec) {
+            // Dispatch to Mesh callback (TODO: Identify
+            // Peer ID? For now anonymous/based on
+            // connection) Ideally handshake first to
+            // establish ID. Assuming NodeID=0 for anonymous
+            // for now.
+            if (mesh_->on_message_) {
+              mesh_->on_message_(0, static_cast<Lane>(lane), read_buffer_);
+              if (auto *m =
+                      lite3cpp::g_metrics.load(std::memory_order_relaxed)) {
+                m->increment_mesh_bytes(lane_to_string(static_cast<Lane>(lane)),
+                                        size, false);
+              }
+            }
+            do_read_header(); // Loop
+          } else {
+            // Error
+          }
+        });
+  }
+
+  void do_write() {
+    auto self(shared_from_this());
+    boost::asio::async_write(
+        socket_, boost::asio::buffer(outbox_.front()),
+        [this, self](boost::system::error_code ec, std::size_t /*length*/) {
+          if (!ec) {
+            outbox_.pop_front();
+            if (!outbox_.empty()) {
+              do_write();
+            }
+          } else {
+            // Error
+          }
+        });
+  }
+};
+
+struct Mesh::Peer {
+  NodeID id;
+  std::string host;
+  int port;
+  // In full impl: 3 pointers for 3 lanes. For basic: 1 connection per lane or 1
+  // shared? Spec says "Multi-Lane". Implementing 1 connection multiplexed for
+  // simplicity first, or 3 separate sockets. Let's do 1 socket multiplexed
+  // logic for now to get it running (header has Lane ID).
+  std::shared_ptr<Connection> conn;
+};
+
+Mesh::Mesh(boost::asio::io_context &io_context, NodeID my_id, int port)
+    : io_context_(io_context), my_id_(my_id), port_(port),
+      acceptor_(io_context, boost::asio::ip::tcp::endpoint(
+                                boost::asio::ip::tcp::v4(), port)) {}
+
+Mesh::~Mesh() {}
+
+void Mesh::listen() { do_accept(); }
+
+void Mesh::do_accept() {
+  acceptor_.async_accept([this](boost::system::error_code ec,
+                                boost::asio::ip::tcp::socket socket) {
+    if (!ec) {
+      // New Incoming Connection
+      auto conn = std::make_shared<Connection>(std::move(socket), this);
+      conn->start();
+      // We don't know PeerID yet until handshake. Store in temp?
+    }
+    do_accept();
+  });
+}
+
+void Mesh::connect(NodeID peer_id, const std::string &host, int port) {
+  boost::asio::ip::tcp::resolver resolver(io_context_);
+  auto endpoints = resolver.resolve(host, std::to_string(port));
+
+  boost::asio::ip::tcp::socket socket(io_context_);
+  boost::asio::connect(socket, endpoints);
+
+  auto conn = std::make_shared<Connection>(std::move(socket), this);
+  conn->start();
+
+  std::lock_guard<std::mutex> lock(peers_mx_);
+  auto peer = std::make_shared<Peer>();
+  peer->id = peer_id;
+  peer->host = host;
+  peer->port = port;
+  peer->conn = conn;
+  peers_[peer_id] = peer;
+}
+
+bool Mesh::send(NodeID peer_id, Lane lane, std::vector<uint8_t> payload) {
+  std::shared_ptr<Peer> peer;
+  {
+    std::lock_guard<std::mutex> lock(peers_mx_);
+    auto it = peers_.find(peer_id);
+    if (it == peers_.end())
+      return false;
+    peer = it->second;
+  }
+
+  if (!peer->conn)
+    return false;
+
+  // Frame: [Lane:4][Size:4][Body...]
+  uint32_t header[2];
+  header[0] = static_cast<uint32_t>(lane);
+  header[1] = static_cast<uint32_t>(payload.size());
+
+  std::vector<uint8_t> frame(sizeof(header) + payload.size());
+  std::memcpy(frame.data(), header, sizeof(header));
+  std::memcpy(frame.data() + sizeof(header), payload.data(), payload.size());
+
+  int lat = latency_ms_.load();
+  if (lat > 0) {
+    auto timer = std::make_shared<boost::asio::steady_timer>(io_context_);
+    timer->expires_after(std::chrono::milliseconds(lat));
+    timer->async_wait([timer, peer, f = std::move(frame)](
+                          const boost::system::error_code &ec) mutable {
+      if (!ec) {
+        if (peer->conn) // Re-check connection?
+          peer->conn->send(std::move(f));
+      }
+    });
+  } else {
+    peer->conn->send(std::move(frame));
+  }
+
+  if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed)) {
+    m->increment_mesh_bytes(lane_to_string(lane), payload.size(), true);
+  }
+
+  return true;
+}
+
+void Mesh::set_on_message(MessageCallback cb) { on_message_ = cb; }
+
+std::vector<NodeID> Mesh::get_active_peers() {
+  std::lock_guard<std::mutex> lock(peers_mx_);
+  std::vector<NodeID> ids;
+  for (auto &pair : peers_) {
+    ids.push_back(pair.first);
+  }
+  return ids;
+}
+
+} // namespace l3kv

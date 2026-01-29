@@ -26,6 +26,7 @@ struct Config {
   int min_threads = 4;
   int max_threads = 16;
   std::string wal_path = "data.wal";
+  uint32_t node_id = 1;
 };
 
 // Simple manual JSON parser for flat config
@@ -105,6 +106,10 @@ Config load_config(const std::string &path) {
     if (!wal.empty())
       cfg.wal_path = wal;
 
+    int nid = extract_int(content, "node_id", -1);
+    if (nid != -1)
+      cfg.node_id = (uint32_t)nid;
+
     std::cout << "Loaded config from " << path << std::endl;
   } catch (const std::exception &e) {
     std::cerr << "Error loading config: " << e.what() << ". Using defaults."
@@ -134,7 +139,7 @@ int main(int argc, char *argv[]) {
 
     // Initialize Database Engine
     std::cout << "DEBUG: Engine init..." << std::endl;
-    Engine db(cfg.wal_path);
+    l3kv::Engine db(cfg.wal_path, cfg.node_id);
     std::cout << "DEBUG: Engine init done." << std::endl;
 
     http_server::http_server server(db, cfg.address, cfg.port, cfg.min_threads,

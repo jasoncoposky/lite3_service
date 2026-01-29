@@ -83,3 +83,41 @@ endif()
 add_executable(test_clock_simple test_clock_simple.cpp src/engine/clock.cpp)
 target_include_directories(test_clock_simple PRIVATE src)
 target_link_libraries(test_clock_simple PRIVATE Threads::Threads)
+
+add_executable(test_phase2 src/tests_cpp/test_phase2.cpp src/engine/mesh.cpp)
+target_include_directories(test_phase2 PRIVATE
+    src
+    "${CMAKE_CURRENT_SOURCE_DIR}/../lib/boost_1_89_0"
+)
+target_link_libraries(test_phase2 PRIVATE
+    Threads::Threads
+    ws2_32
+    lite3-cpp
+)
+
+add_executable(test_merkle src/tests_cpp/test_merkle.cpp)
+target_include_directories(test_merkle PRIVATE src)
+target_link_libraries(test_merkle PRIVATE Threads::Threads)
+
+add_executable(test_mesh_stress src/tests_cpp/test_mesh_stress.cpp src/engine/mesh.cpp)
+target_include_directories(test_mesh_stress PRIVATE
+    src
+    "${CMAKE_CURRENT_SOURCE_DIR}/../lib/boost_1_89_0"
+)
+target_link_libraries(test_mesh_stress PRIVATE
+    Threads::Threads
+    ws2_32
+    lite3-cpp
+)
+
+add_executable(test_sync_simulation src/tests_cpp/test_sync_simulation.cpp src/engine/mesh.cpp src/engine/clock.cpp src/observability/simple_metrics.cpp)
+target_include_directories(test_sync_simulation PRIVATE
+    src
+    "${CMAKE_CURRENT_SOURCE_DIR}/../lib/boost_1_89_0"
+)
+target_link_libraries(test_sync_simulation PRIVATE
+    Threads::Threads
+    ws2_32
+    conveyor
+    lite3-cpp
+)

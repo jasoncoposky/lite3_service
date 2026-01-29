@@ -3,6 +3,7 @@
 #include "wal_storage.hpp"
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <mutex>
@@ -11,7 +12,21 @@
 #include <string_view>
 #include <vector>
 
-enum class WalOp : uint8_t { PUT = 1, PATCH_I64 = 2, DELETE_ = 3 };
+namespace l3kv {
+
+enum class WalOp : uint8_t {
+  PUT = 1,
+  PATCH_I64 = 2,
+  DELETE_ = 3,
+  BATCH = 4,
+  PATCH_STR = 5
+};
+
+struct BatchOp {
+  WalOp op;
+  std::string key;
+  std::string value;
+};
 
 #pragma pack(push, 1)
 struct LogHeader {
@@ -93,6 +108,41 @@ public:
       std::cerr << "WAL Write Error: " << res.error().message() << "\n";
   }
 
+  void append_batch(const std::vector<BatchOp> &ops) {
+    // Serialize batch
+    // [Count:4][Op:1][KeyLen:2][Key][ValLen:4][Val]...
+
+    size_t estimated_size = 4;
+    for (const auto &op : ops) {
+      estimated_size += 1 + 2 + op.key.size() + 4 + op.value.size();
+    }
+
+    std::vector<uint8_t> buf;
+    buf.reserve(estimated_size);
+
+    uint32_t count = (uint32_t)ops.size();
+    auto append4 = [&](uint32_t v) {
+      uint8_t *p = (uint8_t *)&v;
+      buf.insert(buf.end(), p, p + 4);
+    };
+    auto append2 = [&](uint16_t v) {
+      uint8_t *p = (uint8_t *)&v;
+      buf.insert(buf.end(), p, p + 2);
+    };
+
+    append4(count);
+
+    for (const auto &op : ops) {
+      buf.push_back((uint8_t)op.op);
+      append2((uint16_t)op.key.size());
+      buf.insert(buf.end(), op.key.begin(), op.key.end());
+      append4((uint32_t)op.value.size());
+      buf.insert(buf.end(), op.value.begin(), op.value.end());
+    }
+
+    append(WalOp::BATCH, "", std::string_view((char *)buf.data(), buf.size()));
+  }
+
   using RecoverCallback =
       std::function<void(WalOp, std::string_view, std::string_view)>;
   void recover(RecoverCallback callback) {
@@ -157,11 +207,7 @@ public:
         std::vector<uint8_t> read_buf;
         Buffered b{reader, offset, read_buf};
 
-        std::cout << "DEBUG: Starting recovery loop..." << std::endl;
-        int loop_count = 0;
         while (true) {
-          if (loop_count++ % 1000 == 0)
-            std::cout << "DEBUG: Loop " << loop_count << std::endl;
           LogHeader h;
           if (!b.read(&h, sizeof(h), "HEADER"))
             break;
@@ -195,7 +241,48 @@ public:
               break;
             }
           }
-          callback((WalOp)h.op, key, payload);
+
+          if ((WalOp)h.op == WalOp::BATCH) {
+            const uint8_t *ptr = (const uint8_t *)payload.data();
+            const uint8_t *end = ptr + payload.size();
+
+            if (payload.size() < 4) {
+              std::cerr << "WAL: Corrupt batch (too small)\n";
+              continue;
+            }
+            uint32_t count = *(uint32_t *)ptr;
+            ptr += 4;
+
+            for (uint32_t i = 0; i < count; ++i) {
+              if (ptr + 1 > end)
+                break;
+              uint8_t op_byte = *ptr++;
+
+              if (ptr + 2 > end)
+                break;
+              uint16_t klen = *(uint16_t *)ptr;
+              ptr += 2;
+
+              if (ptr + klen > end)
+                break;
+              std::string_view k((const char *)ptr, klen);
+              ptr += klen;
+
+              if (ptr + 4 > end)
+                break;
+              uint32_t vlen = *(uint32_t *)ptr;
+              ptr += 4;
+
+              if (ptr + vlen > end)
+                break;
+              std::string_view v((const char *)ptr, vlen);
+              ptr += vlen;
+
+              callback((WalOp)op_byte, k, v);
+            }
+          } else {
+            callback((WalOp)h.op, key, payload);
+          }
         }
         std::cout << "DEBUG: Recovery loop done. Offset: " << offset
                   << std::endl;
@@ -245,3 +332,5 @@ public:
     return wal_->stats();
   }
 };
+
+} // namespace l3kv

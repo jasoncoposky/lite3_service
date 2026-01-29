@@ -29,6 +29,20 @@ L3KV uses a high-performance **Buffered Write-Ahead Log (WAL)**.
 *   **Startup:** The service scans `data.wal` using a fast-read buffer.
 *   **Corrupt Entries:** Partial writes at the end of the log (from a hard crash) are detected via CRC32 mismatch and discarded, verifying the database to the last consistent state.
 
+## 🌍 Geo-Distributed & Partition Tolerant
+L3KV is designed for global scale, running across multiple regions with unreliable networks:
+*   **Packet-Level Efficiency:** Anti-Entropy usage of Merkle Trees ensures ONLY changed data is transmitted, minimizing WAN bandwidth costs.
+*   **Clock Skew Resistance:** **Hybrid Logical Clocks (HLC)** provide causality guarantees even when physical clocks drift across data centers.
+*   **Partition Tolerance:** The system is **AP (Available, Partition-Tolerant)**. Writes are accepted locally and lazily propagated.
+*   **Eventual Consistency:** Convergence is guaranteed via the Active Anti-Entropy (AAE) gossip protocol.
+
+## 🔄 Multi-Master Replication
+L3KV supports active-active replication with eventual consistency features:
+*   **Active Anti-Entropy (AAE):** Uses Merkle Trees to efficiently detect and synchronize divergent data between nodes.
+*   **Conflict Resolution:** Last-Writer-Wins (LWW) based on Hybrid Logical Clocks (HLC).
+*   **Tombstones:** Propagates deletions across the cluster to ensure consistency.
+*   **Mesh Networking:** High-performance binary protocol over TCP for inter-node communication.
+
 ## 📊 Observability
 
 L3KV includes a comprehensive observability suite for real-time monitoring.
@@ -36,6 +50,8 @@ L3KV includes a comprehensive observability suite for real-time monitoring.
 ### Dashboard
 A zero-dependency, real-time visual monitor is available at `/dashboard`.
 *   **Live Charts:** Visualizes throughput (bytes in/out) and write latency.
+*   **Replication Stats:** Live counters for Keys Repaired and Sync Events.
+*   **Mesh Traffic:** Real-time In/Out throughput for peer communication.
 *   **KPI Cards:** Tracks active connections, total errors (4xx/5xx), and current throughput.
 *   **Dark Mode:** Sleek, modern UI.
 
@@ -46,6 +62,10 @@ A zero-dependency, real-time visual monitor is available at `/dashboard`.
 ```json
 {
   "system": { "active_connections": 5, "thread_count": 8 },
+  "replication": {
+     "keys_repaired": 12,
+     "sync_ops": { "divergent_bucket": 5, "sync_init": 20 }
+  },
   "throughput": { "bytes_received_total": 10240, "http_errors_4xx": 0 }
 }
 ```
@@ -78,16 +98,30 @@ Ensure `config.json` is present in the working directory or provide a path.
 ```json
 {
   "server": {
-    "address": "0.0.0.0",
-    "port": 8080,
-    "min_threads": 4,
-    "max_threads": 16
+    "address": "0.0.0.0",        // Bind address (0.0.0.0 for all interfaces)
+    "port": 8080,                // HTTP API port
+    "min_threads": 4,            // Minimum threads in the predictive pool
+    "max_threads": 16            // Maximum threads (auto-scaled via Kalman Filter)
   },
   "storage": {
-    "wal_path": "data.wal"
+    "wal_path": "data.wal"       // Path to the Write-Ahead Log file
+  },
+  "replication": {
+    "node_id": 1,                // Unique ID for this node (1-255)
+    "peers": ["127.0.0.1:9001"]  // List of peer addresses (Host:Port) for gossip
   }
 }
 ```
+
+| Section | Key | Description |
+| :--- | :--- | :--- |
+| **Server** | `address` | Network interface to bind HTTP server to. |
+| | `port` | Port for REST API and Dashboard. |
+| | `max_threads` | Ceiling for the auto-scaling thread pool. L3KV scales threads based on CPU load prediction. |
+| **Storage** | `wal_path` | Location of the Append-Only Log. Defines durability guarantees. |
+| **Replication** | `node_id` | **Critical**: Must be unique per node to prevent Logical Clock collisions. |
+| | `peers` | Initial list of neighbors for the Mesh. Nodes will strictly gossip with these peers. |
+
 The service listens on port `8080` (or as configured).
 
 ## 🔌 API Reference
@@ -98,8 +132,8 @@ The service listens on port `8080` (or as configured).
 | `PUT` | `/kv/{key}` | Store JSON document. |
 | `DELETE` | `/kv/{key}` | Delete document. |
 | `POST` | `/kv/{key}?op=set_int&field={path}&val={v}` | fast-path integer update. |
-| `GET` | `/metrics` | **(NEW)** Real-time JSON metrics. |
-| `GET` | `/dashboard` | **(NEW)** Visual Dashboard. |
+| `GET` | `/metrics` | Real-time JSON metrics (System + Replication). |
+| `GET` | `/dashboard` | Visual Dashboard (Replication + Stats). |
 | `GET` | `/kv/health` | Health check (returns 200 OK). |
 | `GET` | `/kv/metrics` | (Deprecated) Legacy metrics text. |
 

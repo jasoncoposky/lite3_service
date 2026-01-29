@@ -55,10 +55,10 @@ class session : public std::enable_shared_from_this<session> {
   net::io_context &ioc_;
   beast::flat_buffer buffer_;
   http::request<http::string_body> req_;
-  Engine &db_;
+  l3kv::Engine &db_;
 
 public:
-  session(tcp::socket &&socket, net::io_context &ioc, Engine &db)
+  session(tcp::socket &&socket, net::io_context &ioc, l3kv::Engine &db)
       : socket_(std::move(socket)), ioc_(ioc), db_(db) {
     if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed))
       m->increment_active_connections();
@@ -311,8 +311,8 @@ private:
 // Custom exception for thread exit
 struct ThreadExit : std::exception {};
 
-http_server::http_server(Engine &db, std::string address, unsigned short port,
-                         int min_threads, int max_threads)
+http_server::http_server(l3kv::Engine &db, std::string address,
+                         unsigned short port, int min_threads, int max_threads)
     : address_(std::move(address)), port_(port), ioc_(max_threads),
       signals_(ioc_, SIGINT, SIGTERM, SIGBREAK),
       acceptor_(ioc_, {net::ip::make_address(address_), port_}), db_(db),
