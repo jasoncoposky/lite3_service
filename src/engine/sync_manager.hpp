@@ -6,15 +6,18 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <iostream>
 #include <random>
+#include <string_view>
 #include <thread>
+#include <vector>
 
 #include "observability.hpp"
 
 namespace l3kv {
 
 class SyncManager {
-  Mesh &mesh_;
+  IMesh &mesh_;
   Engine &engine_;
   std::atomic<bool> running_{false};
   std::thread bg_thread_;
@@ -31,7 +34,7 @@ class SyncManager {
   };
 
 public:
-  SyncManager(Mesh &mesh, Engine &engine, uint32_t node_id)
+  SyncManager(IMesh &mesh, Engine &engine, uint32_t node_id)
       : mesh_(mesh), engine_(engine), node_id_(node_id) {}
 
   void start() {
@@ -45,6 +48,19 @@ public:
     running_ = false;
     if (bg_thread_.joinable())
       bg_thread_.join();
+  }
+
+  void trigger_gossip() {
+    std::random_device rd;
+    std::mt19937 rng(rd());
+    // Pick random peer
+    auto peers = mesh_.get_active_peers();
+    if (!peers.empty()) {
+      // Send to one random peer
+      std::uniform_int_distribution<size_t> dist(0, peers.size() - 1);
+      NodeID target = peers[dist(rng)];
+      send_sync_init(target);
+    }
   }
 
   // Handle incoming Control messages
@@ -87,8 +103,6 @@ public:
 
 private:
   void run_loop() {
-    std::random_device rd;
-    std::mt19937 rng(rd());
     std::cout << "[SyncManager] Started gossip loop.\n";
 
     while (running_) {
@@ -96,18 +110,7 @@ private:
       if (!running_)
         break;
 
-      // Pick random peer
-      auto peers = mesh_.get_active_peers();
-      if (!peers.empty()) {
-        // Send to one random peer
-        std::uniform_int_distribution<size_t> dist(0, peers.size() - 1);
-        NodeID target = peers[dist(rng)];
-        send_sync_init(target);
-      }
-      // Also broadcast for MVP test simulation reliability?
-      // No, random gossip is better. But our test waits 4s.
-      // With 2 nodes, peers = [other]. dist(0,0)=0. So it picks the other.
-      // Correct logic.
+      trigger_gossip();
     }
   }
 
@@ -144,8 +147,8 @@ private:
       // In sync.
       return;
     }
-    std::cerr << "[Sync] Root Mismatch. My:" << my_root
-              << " Theirs:" << their_root << "\n";
+    // std::cerr << "[Sync] Root Mismatch. My:" << my_root
+    //           << " Theirs:" << their_root << "\n";
 
     // Mismatch. Drill down. Request Level 1 nodes.
     // We could request all 16 L1 nodes.
@@ -238,15 +241,16 @@ private:
         // child_idx is bucket_idx.
         if (level == 4) {
           // Divergent bucket!
-          std::cerr << "[Sync] Divergent Bucket " << child_idx << "\n";
+          // std::cerr << "[Sync] Divergent Bucket " << child_idx << "\n";
           if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed)) {
             m->increment_sync_ops("divergent_bucket");
           }
           send_req_bucket(from, (uint32_t)child_idx);
         } else {
           // Recurse. Ask for Level+1, Parent=child_idx.
-          std::cerr << "[Sync] Recursing L" << (int)level << " -> " << child_idx
-                    << "\n";
+          // std::cerr << "[Sync] Recursing L" << (int)level << " -> " <<
+          // child_idx
+          //           << "\n";
           send_req_node(from, level + 1, (uint32_t)child_idx);
         }
       }
@@ -467,15 +471,16 @@ private:
       std::vector<uint8_t> data(meta_bytes.begin(), meta_bytes.end());
       lite3cpp::Buffer buf(std::move(data));
 
-      int64_t w = 0;
+      double w = 0.0;
       uint32_t l = 0;
       uint32_t n = 0;
       bool tombstone = false;
 
       // Type check and get
-      if ((buf.get_type(0, "ts") == lite3cpp::Type::Int64 ||
-           buf.get_type(0, "ts") == lite3cpp::Type::Float64)) {
-        w = buf.get_i64(0, "ts");
+      if (buf.get_type(0, "ts") == lite3cpp::Type::Float64) {
+        w = buf.get_f64(0, "ts");
+      } else if (buf.get_type(0, "ts") == lite3cpp::Type::Int64) {
+        w = (double)buf.get_i64(0, "ts");
       }
       if (buf.get_type(0, "l") == lite3cpp::Type::Int64 ||
           buf.get_type(0, "l") == lite3cpp::Type::Float64) {
@@ -489,7 +494,7 @@ private:
         tombstone = buf.get_bool(0, "tombstone");
       }
 
-      return {{w, l, n}, tombstone};
+      return {{(int64_t)w, l, n}, tombstone};
     } catch (...) {
       // Fallback or error
       return {{0, 0, 0}, false};

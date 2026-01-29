@@ -110,12 +110,25 @@ target_link_libraries(test_mesh_stress PRIVATE
     lite3-cpp
 )
 
+
 add_executable(test_sync_simulation src/tests_cpp/test_sync_simulation.cpp src/engine/mesh.cpp src/engine/clock.cpp src/observability/simple_metrics.cpp)
 target_include_directories(test_sync_simulation PRIVATE
     src
     "${CMAKE_CURRENT_SOURCE_DIR}/../lib/boost_1_89_0"
 )
 target_link_libraries(test_sync_simulation PRIVATE
+    Threads::Threads
+    ws2_32
+    conveyor
+    lite3-cpp
+)
+
+add_executable(test_sync_latency src/tests_cpp/test_sync_latency.cpp src/engine/mesh.cpp src/engine/clock.cpp src/observability/simple_metrics.cpp)
+target_include_directories(test_sync_latency PRIVATE
+    src
+    "${CMAKE_CURRENT_SOURCE_DIR}/../lib/boost_1_89_0"
+)
+target_link_libraries(test_sync_latency PRIVATE
     Threads::Threads
     ws2_32
     conveyor

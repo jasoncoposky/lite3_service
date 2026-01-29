@@ -20,28 +20,40 @@ enum class Lane {
   Heavy     // Bulk transfer (Low priority)
 };
 
-class Mesh {
+class IMesh {
 public:
   using MessageCallback =
       std::function<void(NodeID, Lane, const std::vector<uint8_t> &)>;
 
+  virtual ~IMesh() = default;
+
+  virtual void connect(NodeID peer_id, const std::string &host, int port) = 0;
+  virtual bool send(NodeID peer_id, Lane lane,
+                    std::vector<uint8_t> payload) = 0;
+  virtual void set_on_message(MessageCallback cb) = 0;
+  virtual void listen() = 0;
+  virtual std::vector<NodeID> get_active_peers() = 0;
+};
+
+class Mesh : public IMesh {
+public:
   Mesh(boost::asio::io_context &io_context, NodeID my_id, int port);
   ~Mesh();
 
   // Connect to a peer node
-  void connect(NodeID peer_id, const std::string &host, int port);
+  void connect(NodeID peer_id, const std::string &host, int port) override;
 
   // Send payload to peer on specific lane
   // Returns true if queued/sent, false if peer unknown or disconnected
-  bool send(NodeID peer_id, Lane lane, std::vector<uint8_t> payload);
+  bool send(NodeID peer_id, Lane lane, std::vector<uint8_t> payload) override;
 
   // Register callback for incoming messages
-  void set_on_message(MessageCallback cb);
+  void set_on_message(MessageCallback cb) override;
 
   // Start listening for incoming connections
-  void listen();
+  void listen() override;
 
-  std::vector<NodeID> get_active_peers();
+  std::vector<NodeID> get_active_peers() override;
 
   void set_simulated_latency(int ms) { latency_ms_ = ms; }
 
