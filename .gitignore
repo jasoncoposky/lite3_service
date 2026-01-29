@@ -1,4 +1,39 @@
 ﻿build/
-data.wal
-.DS_Store
+bin/
+obj/
+_deps/
+CMakeFiles/
+*.dir/
+*.tlog
+
+# IDEs
 .vscode/
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.user
+*.suo
+
+# CMake
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Logs and Data
+*.log
+*.wal
+*.tmp
+local_dashboard.html
+p.json
+server.err
+server.log
+
+# Build logs/outputs
+build_*.txt
+server_log_*.txt
+debug_run.txt
+traffic_*.log
+node1_debug.log
+node2_debug.log
+dashboard_*.log
