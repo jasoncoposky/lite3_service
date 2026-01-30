@@ -123,9 +123,11 @@ private:
     std::memcpy(&pay[5], &root, 8);
     mesh_.send(target, Lane::Control, pay);
 
+#ifndef LITE3CPP_DISABLE_OBSERVABILITY
     if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed)) {
       m->increment_sync_ops("sync_init");
     }
+#endif
   }
 
   // Old broadcast method replaced
@@ -242,9 +244,11 @@ private:
         if (level == 4) {
           // Divergent bucket!
           // std::cerr << "[Sync] Divergent Bucket " << child_idx << "\n";
+#ifndef LITE3CPP_DISABLE_OBSERVABILITY
           if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed)) {
             m->increment_sync_ops("divergent_bucket");
           }
+#endif
           send_req_bucket(from, (uint32_t)child_idx);
         } else {
           // Recurse. Ask for Level+1, Parent=child_idx.
@@ -453,9 +457,11 @@ private:
     std::cerr << "[Sync] Applying Mutation Key: " << key << "\n";
     engine_.apply_mutation(m);
 
+#ifndef LITE3CPP_DISABLE_OBSERVABILITY
     if (auto *metrics = lite3cpp::g_metrics.load(std::memory_order_relaxed)) {
       metrics->increment_keys_repaired();
     }
+#endif
   }
 
   struct ParsedMeta {

@@ -7,5 +7,7 @@
     },
     "storage": {
         "wal_path": "data.wal"
-    }
+    },
+    "node_id": 1,
+    "mesh_port": 9090
 }

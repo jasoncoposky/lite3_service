@@ -1,0 +1,10 @@
+{
+    "address": "127.0.0.1",
+    "port": 8081,
+    "min_threads": 4,
+    "max_threads": 16,
+    "wal_path": "node2.wal",
+    "node_id": 2,
+    "mesh_port": 9091,
+    "peers": "1:127.0.0.1:9090,3:127.0.0.1:9092"
+}

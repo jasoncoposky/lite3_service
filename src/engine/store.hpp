@@ -251,6 +251,26 @@ public:
     apply_patch_str(meta_key, field, ts_str);
   }
 
+  void patch_str(std::string key, std::string field, std::string val) {
+    auto now = clock_.now();
+    std::string meta_key = key + ":meta";
+    std::string ts_str = std::to_string(now.wall_time) + ":" +
+                         std::to_string(now.logical) + ":" +
+                         std::to_string(now.node_id);
+
+    std::string log_payload_str = field + ":" + val;
+    std::string log_payload_meta = field + ":" + ts_str;
+
+    std::vector<BatchOp> batch;
+    batch.push_back({WalOp::PATCH_STR, key, log_payload_str});
+    batch.push_back({WalOp::PATCH_STR, meta_key, log_payload_meta});
+
+    wal_->append_batch(batch);
+
+    apply_patch_str(key, field, val);
+    apply_patch_str(meta_key, field, ts_str);
+  }
+
   bool del(const std::string &key) {
     auto now = clock_.now();
     std::string meta_key = key + ":meta";

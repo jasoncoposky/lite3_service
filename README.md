@@ -142,6 +142,25 @@ The service listens on port `8080` (or as configured).
 
 ## ⚡ Performance Metrics
 
+
+## 📊 Benchmarks
+
+### How to Run
+
+1.  **Build** (Release Mode):
+    ```powershell
+    cd L3KV
+    cmake --build build --config Release
+    ```
+
+2.  **Single Node:**
+    *   Start Server: `./build/Release/l3svc.exe`
+    *   Run Workload A: `./build/Release/bench_ycsb.exe --threads 1`
+
+3.  **Cluster (3-Node):**
+    *   Start Cluster: `./start_cluster.ps1`
+    *   Run Distributed Workload: `./build/Release/bench_ycsb.exe --threads 8 --hosts 127.0.0.1:8080,127.0.0.1:8081,127.0.0.1:8082`
+
 Benchmark results (Windows 11, Ryzen 7 5700X, Loopback):
 
 | Operation | Latency (Server Internal) | Description |

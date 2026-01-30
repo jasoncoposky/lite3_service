@@ -10,12 +10,18 @@ find_package(Threads REQUIRED)
 
 # Lite3++ (now lite3-cpp) is a subdirectory
 set(LITE3CPP_DISABLE_OBSERVABILITY OFF CACHE BOOL "" FORCE)
+if(LITE3CPP_DISABLE_OBSERVABILITY)
+    add_compile_definitions(LITE3CPP_DISABLE_OBSERVABILITY)
+endif()
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../lib/lite3-cpp ${CMAKE_CURRENT_SOURCE_DIR}/../lib/lite3-cpp/build)
 
 
 # libconveyor
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../lib/libconveyor ${CMAKE_CURRENT_SOURCE_DIR}/../lib/libconveyor/build)
+
+# liblite3client
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../lib/liblite3client ${CMAKE_CURRENT_SOURCE_DIR}/../lib/liblite3client/build)
 
 # Expose Engine as Interface Library
 add_library(l3kv_engine INTERFACE)
@@ -81,7 +87,7 @@ if(MSVC)
     add_definitions(-D_WIN32_WINNT=0x0A00 -DNOMINMAX)
 endif()
 
-add_executable(test_clock_simple test_clock_simple.cpp src/engine/clock.cpp)
+add_executable(test_clock_simple src/tests_cpp/test_clock_simple.cpp src/engine/clock.cpp)
 target_include_directories(test_clock_simple PRIVATE src)
 target_link_libraries(test_clock_simple PRIVATE Threads::Threads)
 
@@ -133,5 +139,29 @@ target_link_libraries(test_sync_latency PRIVATE
     Threads::Threads
     ws2_32
     conveyor
+    lite3-cpp
+)
+
+# Benchmark C: Twitter Trace
+add_executable(bench_twitter src/tests_cpp/bench_twitter.cpp)
+target_include_directories(bench_twitter PRIVATE
+    src
+    "${CMAKE_CURRENT_SOURCE_DIR}/../lib/liblite3client/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../lib/liblite3client/external"
+)
+target_link_libraries(bench_twitter PRIVATE
+    lite3client
+)
+
+# Benchmark YCSB: Workload A
+add_executable(bench_ycsb src/tests_cpp/bench_ycsb.cpp)
+target_include_directories(bench_ycsb PRIVATE
+    src
+    "${CMAKE_CURRENT_SOURCE_DIR}/../lib/liblite3client/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../lib/liblite3client/external"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../lib/lite3-cpp/include"
+)
+target_link_libraries(bench_ycsb PRIVATE
+    lite3client
     lite3-cpp
 )

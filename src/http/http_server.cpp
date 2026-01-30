@@ -39,11 +39,13 @@ struct ScopedMetric {
       double dur = std::chrono::duration<double>(end - start).count();
       // Access global metrics via pointer cast if needed, or just relying on
       // IMetrics interface
+#ifndef LITE3CPP_DISABLE_OBSERVABILITY
       lite3cpp::IMetrics *m =
           lite3cpp::g_metrics.load(std::memory_order_acquire);
       if (m) {
         m->record_latency(op, dur);
       }
+#endif
     } catch (...) {
     }
   }
@@ -60,13 +62,17 @@ class session : public std::enable_shared_from_this<session> {
 public:
   session(tcp::socket &&socket, net::io_context &ioc, l3kv::Engine &db)
       : socket_(std::move(socket)), ioc_(ioc), db_(db) {
+#ifndef LITE3CPP_DISABLE_OBSERVABILITY
     if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed))
       m->increment_active_connections();
+#endif
   }
 
   ~session() {
+#ifndef LITE3CPP_DISABLE_OBSERVABILITY
     if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed))
       m->decrement_active_connections();
+#endif
   }
 
   void run() { do_read(); }
@@ -81,8 +87,10 @@ private:
 
   void on_read(beast::error_code ec, std::size_t bytes_transferred) {
     boost::ignore_unused(bytes_transferred);
+#ifndef LITE3CPP_DISABLE_OBSERVABILITY
     if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed))
       m->record_bytes_received(bytes_transferred);
+#endif
 
     if (ec == http::error::end_of_stream) {
       return do_close();
@@ -144,12 +152,16 @@ private:
       res.set(http::field::server, "Lite3");
       res.set(http::field::content_type, "application/json");
 
+#ifndef LITE3CPP_DISABLE_OBSERVABILITY
       auto *m = lite3cpp::g_metrics.load(std::memory_order_acquire);
       if (auto *sm = dynamic_cast<SimpleMetrics *>(m)) {
         res.body() = sm->get_json();
       } else {
         res.body() = "{}"; // Should not happen
       }
+#else
+      res.body() = "{\"error\": \"observability_disabled\"}";
+#endif
 
       res.keep_alive(req_.keep_alive());
       res.prepare_payload();
@@ -165,6 +177,7 @@ private:
     }
 
     if (req_.method() == http::verb::get && target == "/kv/metrics") {
+#ifndef LITE3CPP_DISABLE_OBSERVABILITY
       auto *metrics = dynamic_cast<SimpleMetrics *>(lite3cpp::g_metrics.load());
       std::string body;
       if (metrics) {
@@ -172,6 +185,9 @@ private:
       } else {
         body = "Metrics not available (null)\n";
       }
+#else
+      std::string body = "Metrics disabled via cmake\n";
+#endif
 
       auto wal_stats = db_.get_wal_stats();
       body += "\n=== WAL Metrics (libconveyor) ===\n";
@@ -198,18 +214,22 @@ private:
         http::response<http::empty_body> res{http::status::not_found,
                                              req_.version()};
         res.keep_alive(req_.keep_alive());
+        res.prepare_payload();
         return send_response(std::move(res));
       }
 
-      // Convert Buffer to JSON string
-      std::string json_string =
-          lite3cpp::lite3_json::to_json_string(buffer_data, 0);
+      // "Zero-Serialize" Read: Return Raw Binary
+      // The user specified "reads should also not be serialized".
+      // We return the raw lite3 internal buffer. Clients must handle it.
 
       http::response<http::string_body> res{http::status::ok, req_.version()};
       res.set(http::field::server, "Lite3");
-      res.set(http::field::content_type,
-              "application/json");         // Set content type to JSON
-      res.body() = std::move(json_string); // Set body to JSON string
+      res.set(http::field::content_type, "application/octet-stream");
+      // Cast raw bytes to string body (copy)
+      const char *ptr = reinterpret_cast<const char *>(buffer_data.data());
+      if (ptr && buffer_data.size() > 0) {
+        res.body().assign(ptr, buffer_data.size());
+      }
       res.keep_alive(req_.keep_alive());
       res.prepare_payload();
       return send_response(std::move(res));
@@ -244,6 +264,13 @@ private:
         res.prepare_payload();
         return send_response(std::move(res));
       }
+      if (params["op"] == "set_str") {
+        db_.patch_str(key, params["field"], params["val"]);
+        http::response<http::empty_body> res{http::status::ok, req_.version()};
+        res.keep_alive(req_.keep_alive());
+        res.prepare_payload();
+        return send_response(std::move(res));
+      }
       return send_response(bad_req("Unknown op"));
     }
 
@@ -269,10 +296,12 @@ private:
   template <class Body, class Allocator>
   void
   send_response(http::response<Body, http::basic_fields<Allocator>> &&res) {
+#ifndef LITE3CPP_DISABLE_OBSERVABILITY
     if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed)) {
       int status = static_cast<int>(res.result());
       m->record_error(status);
     }
+#endif
     auto sp =
         std::make_shared<http::response<Body, http::basic_fields<Allocator>>>(
             std::move(res));
@@ -287,8 +316,10 @@ private:
   void on_write(beast::error_code ec, std::size_t bytes_transferred,
                 bool keep_alive) {
     boost::ignore_unused(bytes_transferred);
+#ifndef LITE3CPP_DISABLE_OBSERVABILITY
     if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed))
       m->record_bytes_sent(bytes_transferred);
+#endif
 
     if (ec) {
       std::cerr << "write: " << ec.message() << "\n";
@@ -386,11 +417,13 @@ void http_server::manager_loop() {
     dt = 0.001;
 
   int active_reqs = 0;
+#ifndef LITE3CPP_DISABLE_OBSERVABILITY
   if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed)) {
     if (auto *sm = dynamic_cast<SimpleMetrics *>(m)) {
       active_reqs = sm->get_active_connections();
     }
   }
+#endif
 
   kf_.predict(dt);
   kf_.update(static_cast<double>(active_reqs));
@@ -421,11 +454,13 @@ void http_server::manager_loop() {
     adjust_pool_size(target);
   }
 
+#ifndef LITE3CPP_DISABLE_OBSERVABILITY
   if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed)) {
     if (auto *sm = dynamic_cast<SimpleMetrics *>(m)) {
       sm->set_thread_count(n_threads_);
     }
   }
+#endif
 
   start_manager();
 }

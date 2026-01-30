@@ -4,11 +4,14 @@
 #include <array>
 #include <cstdint>
 #include <iomanip>
+#include <iostream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
+
 
 namespace l3kv {
 
@@ -27,212 +30,118 @@ inline uint64_t fnv1a_64(std::string_view s) {
   return fnv1a_64(s.data(), s.size());
 }
 
-// 4-Level Hex Tree
-// Level 0: 1 Node (Root)
-// Level 1: 16 Nodes
-// Level 2: 256 Nodes
-// Level 3: 4096 Nodes
-// Level 4: 65536 Buckets (Leaves)
-
 class MerkleTree {
-  // We represent the tree as a flat array or sparse map?
-  // Flat array for 65k leaves + parents is roughly 70k uint64_t ~= 560KB. Very
-  // cheap. Structure: L4 (Leaves): Offset 4681 (approx) -> 65536 entries?
-  // Actually, standard heap layout:
-  // Node i has children 16*i + 1 ... 16*i + 16.
-  // But 16-ary tree logic is a bit manual.
-  //
-  // Let's use Layered Arrays for simplicity.
-  // L4: 65536 hashes
-  // L3: 4096 hashes
-  // L2: 256 hashes
-  // L1: 16 hashes
-  // L0: 1 hash
+private:
+  static constexpr size_t L4_SIZE = 65536;
+  static constexpr size_t L3_SIZE = 4096;
+  static constexpr size_t SHARD_COUNT = 256;
 
-  std::array<std::vector<uint64_t>, 5> layers_;
-  std::array<std::vector<bool>, 5> dirty_; // Dirty bits for lazy calc
-  mutable std::mutex mx_;
+  std::vector<uint64_t> leaves_; // 65536
+  std::vector<uint64_t> l3_;     // 4096
+  std::vector<uint8_t>
+      l3_dirty_; // Use uint8_t for thread safety (avoid vector<bool>)
+
+  std::vector<uint64_t> l2_; // 256
+  std::vector<uint8_t> l2_dirty_;
+  std::vector<uint64_t> l1_; // 16
+  std::vector<uint8_t> l1_dirty_;
+  std::vector<uint64_t> l0_; // 1
+  std::vector<uint8_t> l0_dirty_;
+
+  // Lock Hierarchy: global_mx_ -> shards_[i].mx
+  mutable std::mutex global_mx_;
+  std::vector<std::unique_ptr<std::mutex>> shards_;
 
 public:
   MerkleTree() {
-    // Initialize layers
-    layers_[4].resize(65536, 0);
-    layers_[3].resize(4096, 0);
-    layers_[2].resize(256, 0);
-    layers_[1].resize(16, 0);
-    layers_[0].resize(1, 0);
+    leaves_.resize(L4_SIZE, 0);
+    l3_.resize(L3_SIZE, 0);
+    l3_dirty_.resize(L3_SIZE, 0);
+    l2_.resize(256, 0);
+    l2_dirty_.resize(256, 0);
+    l1_.resize(16, 0);
+    l1_dirty_.resize(16, 0);
+    l0_.resize(1, 0);
+    l0_dirty_.resize(1, 0);
 
-    // Initial dirty state: clean (all zero)
-    dirty_[4].resize(65536, false);
-    dirty_[3].resize(4096, false);
-    dirty_[2].resize(256, false);
-    dirty_[1].resize(16, false);
-    dirty_[0].resize(1, false);
+    for (size_t i = 0; i < SHARD_COUNT; ++i) {
+      shards_.push_back(std::make_unique<std::mutex>());
+    }
   }
 
-  // Update a key.
-  // val_hash could be hash of (Timestamp + Value) to capture all state.
-  void update(std::string_view key, uint64_t val_hash) {
-    std::lock_guard<std::mutex> lock(mx_);
-
-    // 1. Map Key to Bucket (0-65535)
-    // We use the top 16 bits of the key's hash
-    uint64_t k_hash = fnv1a_64(key);
-    uint32_t bucket_idx = (k_hash >> 48) & 0xFFFF; // Top 16 bits
-
-    // 2. XOR into Leaf Bucket
-    // Merkle bucket = XOR sum of all items in it. Order independent.
-    // If update is "New Value replacing Old Value", we need XOR(Old) ^
-    // XOR(New). PROBLEM: We don't know "Old" value hash here unless we store it
-    // or caller provides it. Standard Merkle usually recomputes bucket from
-    // scratch or maintains Count/XorSum. BUT: L3KV `update` is called on Put.
-    // We might not know previous state easily without read. OPTION A: Caller
-    // provides (OldHash, NewHash). OPTION B: We only support "Rebuild Bucket"
-    // or Assume caller handles the XOR delta logic?
-    //
-    // Simplify: The "Value" of the bucket is the Hash of its content.
-    // In Dynamo/Cassandra, bucket = Hash(Keys in range).
-    // If we use XOR-Filter style: BucketValue ^= Hash(Key, Val).
-    // On Delete: BucketValue ^= Hash(Key, Val). (XOR removes it).
-    // On Overwrite: BucketValue ^= Hash(Key, OldVal) ^ Hash(Key, NewVal).
-    //
-    // So we need `update(key, old_val_hash, new_val_hash)`.
-    // If insert: old=0.
-    // If delete: new=0.
-
-    // Let's change signature to support Delta.
-    // But wait, Store apply_put doesn't know old val hash easily without
-    // deserializing old blob.
-    //
-    // Alternative: "Dirty Bucket" just marks bucket as "Needs Rescan".
-    // Then a background job scans the Table for keys in that bucket range and
-    // recomputes. That's more robust but slower.
-    //
-    // Given the prompt "High-Granularity... Dirty Bucket Merkle", usually
-    // implies: Write -> Mark Bucket Dirty. Read Root -> If Dirty, Recompute
-    // affected branches. But "Recompute" requires source data. If we don't
-    // store the tree state per key, we must scan table. Scanning 1/65536th of
-    // table is fast. BUT our Engine doesn't support Range Scans yet easily
-    // (Hash Map Sharded). Sharded Map makes range scan hard (keys scattered).
-    //
-    // Workaround: We will use the XOR approach for O(1) updates.
-    // Restriction: Store MUST provide old hash.
-    // This assumes we can calculate hash(val) cheaply.
-
-    // Let's implement `xor_update(bucket, hash_delta)`.
-    // Caller is responsible for xor-ing old and new.
-
-    layers_[4][bucket_idx] ^= val_hash;
-
-    // Mark path dirty up to root
-    mark_dirty(4, bucket_idx);
-  }
-
-  // Helper for XOR update logic
-  // delta = Hash(Key, NewVal) ^ Hash(Key, OldVal)
   void apply_delta(std::string_view key, uint64_t hash_delta) {
-    std::lock_guard<std::mutex> lock(mx_);
     uint64_t k_hash = fnv1a_64(key);
-    uint32_t bucket_idx = (k_hash >> 48) & 0xFFFF;
+    uint32_t bucket_idx = (k_hash >> 48) & 0xFFFF; // 0..65535
+    size_t shard_idx = bucket_idx >> 8;            // 256 shards
 
-    layers_[4][bucket_idx] ^= hash_delta;
-    mark_dirty(4, bucket_idx);
+    std::lock_guard<std::mutex> lock(*shards_[shard_idx]);
+    leaves_[bucket_idx] ^= hash_delta;
+    l3_dirty_[bucket_idx >> 4] = 1;
   }
 
   uint64_t get_root_hash() {
-    std::lock_guard<std::mutex> lock(mx_);
+    std::lock_guard lock(global_mx_);
     recompute_dirty();
-    return layers_[0][0];
+    return l0_[0];
   }
 
   uint64_t get_node_hash(int level, size_t index) {
-    std::lock_guard<std::mutex> lock(mx_);
-    recompute_dirty(); // Ensure clean before reading any node? Or just specific
-                       // path?
-    // Simple: recompute all dirty.
-    if (level < 0 || level > 4)
-      return 0;
-    if (index >= layers_[level].size())
-      return 0;
-    return layers_[level][index];
+    // Note: recompute_dirty() must be called via get_root_hash() first
+    // to ensure consistency if used by SyncManager.
+    // SyncManager calls get_root_hash once, then get_node_hash multiple times.
+    // This avoids redundant recomputations.
+    if (level == 0)
+      return l0_[0];
+    if (level == 1)
+      return l1_[index];
+    if (level == 2)
+      return l2_[index];
+    if (level == 3)
+      return l3_[index];
+    if (level == 4)
+      return leaves_[index];
+    return 0;
   }
 
 private:
-  void mark_dirty(int level, size_t idx) {
-    // Mark this node dirty?
-    // Actually, if we update L4, we need L3 parent to know it's stale.
-    // L3 parent idx = idx / 16.
-    if (level > 0) {
-      size_t parent = idx / 16;
-      if (!dirty_[level - 1][parent]) {
-        dirty_[level - 1][parent] = true;
-        mark_dirty(level - 1, parent);
-      }
-    }
-  }
-
   void recompute_dirty() {
-    // Recompute from L4 up to L0?
-    // Actually, we marked path dirty from L3 up to L0.
-    // We iterate levels 3 down to 0 ? No, we need 4->3, 3->2, etc.
-    // Wait, modifying L4 is instant. We need to propagate changes up.
-    // Strategy: To get root, we need clean L0. L0 depends on L1...
-    // We should iterate Levels 3 to 0. (L4 is always "source of truth").
-
-    // But we only want to recompute *dirty* nodes.
-    // Iterating all 4096 L3 nodes to check dirty is fast.
-
-    // Level 3 (Parents of Leaves)
-    for (size_t i = 0; i < layers_[3].size(); ++i) {
-      if (dirty_[3][i]) {
-        uint64_t sum = 0; // Using XOR sum or Hash of children?
-        // Merkle usually Hash(Concat Children).
-        // XOR sum of children is also valid for homomorphic properties but
-        // weaker collision. Let's use Hash(Children). Combine 16 children.
-        // Optimization: Just XOR them?
-        // "Dirty Bucket Merkle" often implies precise hashing.
-        // Let's do Hash of Children hashes.
-        uint64_t combined = 0;
-        for (int k = 0; k < 16; ++k) {
-          // Mix child hash
-          uint64_t child_h = layers_[4][i * 16 + k];
-          // Simple mix: Rotate and XOR?
-          // Or just re-hash the block of 16 uint64s.
-          // Re-hashing is better.
-          // We'll accumulate in a buffer if needed, or incremental fnv?
-          // Incremental FNV over 16 * 8 bytes.
-          // Simpler: combined = fnv1a( &child_h, 8 ) mixed.
+    // Phase 1: L3 from Leaves (Locking Shards sequentially)
+    for (size_t s = 0; s < SHARD_COUNT; ++s) {
+      std::lock_guard<std::mutex> slock(*shards_[s]);
+      size_t start_l3 = s * 16;
+      for (size_t i = 0; i < 16; ++i) {
+        size_t curr_l3 = start_l3 + i;
+        if (l3_dirty_[curr_l3]) {
+          uint64_t child_hashes[16];
+          for (int k = 0; k < 16; ++k)
+            child_hashes[k] = leaves_[curr_l3 * 16 + k];
+          l3_[curr_l3] = fnv1a_64(child_hashes, 16 * sizeof(uint64_t));
+          l3_dirty_[curr_l3] = 0;
+          l2_dirty_[curr_l3 >> 4] = 1;
         }
-        // Implementation: Hash the array slice.
-        const auto *data = &layers_[4][i * 16];
-        layers_[3][i] = fnv1a_64(data, 16 * sizeof(uint64_t));
-        dirty_[3][i] = false;
       }
     }
 
-    // Level 2
-    for (size_t i = 0; i < layers_[2].size(); ++i) {
-      if (dirty_[2][i]) {
-        const auto *data = &layers_[3][i * 16];
-        layers_[2][i] = fnv1a_64(data, 16 * sizeof(uint64_t));
-        dirty_[2][i] = false;
+    // Phase 2-4: Serial processing for higher levels (protected by global_mx_)
+    for (size_t i = 0; i < 256; ++i) {
+      if (l2_dirty_[i]) {
+        l2_[i] = fnv1a_64(&l3_[i * 16], 16 * sizeof(uint64_t));
+        l2_dirty_[i] = 0;
+        l1_dirty_[i >> 4] = 1;
       }
     }
 
-    // Level 1
-    for (size_t i = 0; i < layers_[1].size(); ++i) {
-      if (dirty_[1][i]) {
-        const auto *data = &layers_[2][i * 16];
-        layers_[1][i] = fnv1a_64(data, 16 * sizeof(uint64_t));
-        dirty_[1][i] = false;
+    for (size_t i = 0; i < 16; ++i) {
+      if (l1_dirty_[i]) {
+        l1_[i] = fnv1a_64(&l2_[i * 16], 16 * sizeof(uint64_t));
+        l1_dirty_[i] = 0;
+        l0_dirty_[0] = 1;
       }
     }
 
-    // Level 0
-    if (dirty_[0][0]) {
-      const auto *data = &layers_[1][0];
-      layers_[0][0] = fnv1a_64(data, 16 * sizeof(uint64_t));
-      dirty_[0][0] = false;
+    if (l0_dirty_[0]) {
+      l0_[0] = fnv1a_64(&l1_[0], 16 * sizeof(uint64_t));
+      l0_dirty_[0] = 0;
     }
   }
 };
