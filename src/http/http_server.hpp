@@ -82,6 +82,7 @@ private:
 
   KalmanFilter kf_;
   std::chrono::steady_clock::time_point last_tick_;
+  std::chrono::steady_clock::time_point last_resize_time_;
 };
 
 } // namespace http_server

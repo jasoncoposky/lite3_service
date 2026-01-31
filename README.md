@@ -112,6 +112,7 @@ Ensure `config.json` is present in the working directory or provide a path.
   },
   "min_threads": 4,
   "max_threads": 16,
+  "mesh_threads": 2,
   "wal_path": "node1.wal"
 }
 ```

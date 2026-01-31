@@ -1,6 +1,19 @@
 #ifndef L3KV_ENGINE_MERKLE_HPP
 #define L3KV_ENGINE_MERKLE_HPP
 
+/*
+ * MERKLE TREE IMPLEMENTATION - LAZY UPDATES
+ *
+ * Update Strategy:
+ * - `apply_delta()` affects only the Leaf (L4) and marks the Leaf's parent (L3)
+ * as dirty.
+ * - This is an O(1) operation involving a simple XOR and bitset flag.
+ * - Full tree recomputation is deferred until `get_root_hash()` is called.
+ * - Only dirty branches are rehashed up to the root.
+ * - This ensures high write throughput (microsecond latency) without paying the
+ * Full Tree Hash cost on every write.
+ */
+
 #include <array>
 #include <cstdint>
 #include <iomanip>
@@ -11,7 +24,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
 
 namespace l3kv {
 
@@ -67,6 +79,23 @@ public:
     for (size_t i = 0; i < SHARD_COUNT; ++i) {
       shards_.push_back(std::make_unique<std::mutex>());
     }
+
+    // Initialize tree to steady state (recursive hashes of 0)
+    std::vector<uint64_t> zeros(16, 0);
+    uint64_t h_l3 = fnv1a_64(zeros.data(), 16 * sizeof(uint64_t));
+    std::fill(l3_.begin(), l3_.end(), h_l3);
+
+    std::vector<uint64_t> l3_block(16, h_l3);
+    uint64_t h_l2 = fnv1a_64(l3_block.data(), 16 * sizeof(uint64_t));
+    std::fill(l2_.begin(), l2_.end(), h_l2);
+
+    std::vector<uint64_t> l2_block(16, h_l2);
+    uint64_t h_l1 = fnv1a_64(l2_block.data(), 16 * sizeof(uint64_t));
+    std::fill(l1_.begin(), l1_.end(), h_l1);
+
+    std::vector<uint64_t> l1_block(16, h_l1);
+    uint64_t h_l0 = fnv1a_64(l1_block.data(), 16 * sizeof(uint64_t));
+    l0_[0] = h_l0;
   }
 
   void apply_delta(std::string_view key, uint64_t hash_delta) {

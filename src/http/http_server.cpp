@@ -571,10 +571,20 @@ void http_server::manager_loop() {
     target = min_threads_;
 
   if (target != current_threads) {
-    std::cout << "[Manager] Resizing pool: " << current_threads << " -> "
-              << target << " (Active: " << active_reqs
-              << ", Future: " << future_load << ")" << std::endl;
-    adjust_pool_size(target);
+    auto now = std::chrono::steady_clock::now();
+    double time_since_resize =
+        std::chrono::duration<double>(now - last_resize_time_).count();
+
+    // Hysteresis: Don't resize if we just resized recently (2.0s)
+    if (time_since_resize < 2.0) {
+      // std::cout << "[Manager] Skipping resize (hysteresis cooldown)\n";
+    } else {
+      std::cout << "[Manager] Resizing pool: " << current_threads << " -> "
+                << target << " (Active: " << active_reqs
+                << ", Future: " << future_load << ")" << std::endl;
+      adjust_pool_size(target);
+      last_resize_time_ = now;
+    }
   }
 
 #ifndef LITE3CPP_DISABLE_OBSERVABILITY

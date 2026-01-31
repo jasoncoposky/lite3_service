@@ -1,6 +1,8 @@
 #include "clock.hpp"
 #include <algorithm> // for std::max
 #include <chrono>
+#include <iostream>
+#include <thread>
 
 namespace l3kv {
 
@@ -20,8 +22,35 @@ Timestamp HybridLogicalClock::now() {
     max_logical_ = 0;
   } else {
     // Clock hasn't moved forward, or we are being called faster than 1us
-    // resolution Increment logical counter
-    max_logical_++;
+
+    // Safety: Check for backwards clock jumps (skew)
+    int64_t diff = max_wall_time_ - phys_now;
+    if (diff > 5000000) { // 5 seconds
+      // Only log periodically to avoid spamming
+      static int64_t last_warn = 0;
+      if (phys_now - last_warn > 5000000) {
+        std::cerr << "[HLC] WARNING: Physical clock lagging logical clock by "
+                  << (diff / 1000) << "ms. (System clock moved backwards?)\n";
+        last_warn = phys_now;
+      }
+    }
+
+    // Safety: Overflow protection
+    if (max_logical_ == UINT32_MAX) {
+      // Critical Error: We exhausted 4 billion logical ticks in 1 microsecond?
+      // Or (more likely) the physical clock is stuck/backwards for a LONG time.
+      // We MUST wait for physical time to advance to preserve ordering.
+      std::cerr << "[HLC] CRITICAL: Logical counter overflow. Blocking until "
+                   "physical time advances.\n";
+      while (get_physical_time() <= max_wall_time_) {
+        std::this_thread::yield();
+      }
+      auto new_phys = get_physical_time();
+      max_wall_time_ = new_phys;
+      max_logical_ = 0;
+    } else {
+      max_logical_++;
+    }
   }
 
   return {max_wall_time_, max_logical_, node_id_};
@@ -56,9 +85,6 @@ int64_t HybridLogicalClock::reserve_logical(int64_t for_phys_time, int count) {
   int64_t phys_now = std::max(get_physical_time(), max_wall_time_);
 
   if (for_phys_time < phys_now) {
-    // Caller's time is stale. They should update their physical time and retry.
-    // However, if we forced clock forward (debug), max_wall_time_ >
-    // get_physical_time().
     return -1;
   }
 
@@ -66,6 +92,11 @@ int64_t HybridLogicalClock::reserve_logical(int64_t for_phys_time, int count) {
   if (for_phys_time > max_wall_time_) {
     max_wall_time_ = for_phys_time;
     max_logical_ = 0;
+  }
+
+  // Overflow check for batch reservation
+  if (UINT32_MAX - max_logical_ < (uint32_t)count) {
+    return -1; // Cannot reserve
   }
 
   int64_t start_logical = max_logical_ + 1;
@@ -90,9 +121,6 @@ Timestamp ThreadLocalClock::now() {
   }
 
   // 2. Refill batch
-  // Optimization: If we are here, either time advanced (and we have no batch)
-  // or time didn't advance (and batch exhausted).
-  // We need to reserve new batch from global clock.
   const int BATCH_SIZE = 50;
   while (true) {
     // Attempt reservation
@@ -106,34 +134,14 @@ Timestamp ThreadLocalClock::now() {
               global_clock_->get_node_id()};
     }
 
-    // Reservation failed (global clock is ahead). Update local time and retry.
-    // Actually, if global clock is ahead (e.g. from receive update), we should
-    // catch up.
-    // reserve_logical returns -1 if for_phys_time < global max.
-    // We should peek global max? Or simply rely on reserve_logical logic?
-    // Let's grab physically again.
+    // Reservation failed.
+    // Ensure we don't spin too tight if clock is fighting
+    std::this_thread::yield();
+
     int64_t next_phys = get_physical_time();
     if (next_phys == phys_now) {
-      // Physical time hasn't changed, but global is ahead?
-      // This implies receive update pushed global forward.
-      // We must increment physical time to at least global?
-      // Wait, we can't just invent physical time unless we track max locally OR
-      // query global.
-      // Better strategy: ask global for "current or newer".
-      // Simplified: Just use Global Now fallback for single tick if we are
-      // fighting? No, we want batching.
-
-      // Let's assume we simply retry with new physical time.
-      // If we are spinning, eventually physical time updates.
-      // But if clock skew, we might spin for ms.
-      // Better: Global clock shoud just "Adopt" our for_phys_time if valid?
-      // No...
-      // Real implementation: We need to know what 'time' to ask for.
-      // If global is ahead, we should ask for global's time?
-      Timestamp global_now = global_clock_->now(); // This ticks logical!
-      // This defeats batching if we use it.
-      // But it gives us valid time.
-      return global_now;
+      // Force fallback to global if stuck
+      return global_clock_->now();
     }
     phys_now = next_phys;
   }

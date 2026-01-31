@@ -44,6 +44,7 @@ struct Config {
   std::string wal_path = "data.wal";
   uint32_t node_id = 1;
   int mesh_port = 9090;
+  int mesh_threads = 2; // Default to 2 for thread pool
   std::vector<PeerConfig> peers;
   std::string cluster_mode = "replicated"; // "replicated" or "sharded"
   int num_shards = 1;
@@ -69,6 +70,7 @@ Config load_config(const std::string &path) {
     cfg.wal_path = j.value("wal_path", cfg.wal_path);
     cfg.node_id = j.value("node_id", cfg.node_id);
     cfg.mesh_port = j.value("mesh_port", cfg.mesh_port);
+    cfg.mesh_threads = j.value("mesh_threads", cfg.mesh_threads);
 
     if (j.contains("cluster")) {
       auto &c = j["cluster"];
@@ -90,8 +92,6 @@ Config load_config(const std::string &path) {
             }
           }
         }
-        // Fallback for legacy string format? No, user explicitly asked to use
-        // keys.
       }
     }
     // Also check root "peers" if not found in cluster?
@@ -132,6 +132,7 @@ int main(int argc, char *argv[]) {
     std::cout << "  WAL Path: " << cfg.wal_path << std::endl;
     std::cout << "  Node ID: " << cfg.node_id << std::endl;
     std::cout << "  Mesh Port: " << cfg.mesh_port << std::endl;
+    std::cout << "  Mesh Threads: " << cfg.mesh_threads << std::endl;
 
     // Register metrics with lite3-cpp
     lite3cpp::set_metrics(&global_metrics);
@@ -154,15 +155,21 @@ int main(int argc, char *argv[]) {
     mesh.listen();
     std::cout << "DEBUG: Mesh listening." << std::endl;
 
-    // Start Mesh IO thread
-    std::thread mesh_thread([&io_context]() {
-      std::cout << "DEBUG: Mesh thread started." << std::endl;
-      try {
-        io_context.run();
-      } catch (const std::exception &e) {
-        std::cerr << "DEBUG: Mesh io_context error: " << e.what() << std::endl;
-      }
-    });
+    // Start Mesh IO thread POOL
+    std::vector<std::thread> mesh_pool;
+    std::cout << "DEBUG: Starting Mesh pool with " << cfg.mesh_threads
+              << " threads." << std::endl;
+    for (int i = 0; i < cfg.mesh_threads; ++i) {
+      mesh_pool.emplace_back([&io_context, i]() {
+        // std::cout << "DEBUG: Mesh worker " << i << " started.\n";
+        try {
+          io_context.run();
+        } catch (const std::exception &e) {
+          std::cerr << "DEBUG: Mesh io_context error: " << e.what()
+                    << std::endl;
+        }
+      });
+    }
 
     // Map of peers for HTTP redirection: ID -> {Host, HTTP_Port}
     std::map<uint32_t, std::pair<std::string, int>> http_peers;
@@ -214,8 +221,11 @@ int main(int argc, char *argv[]) {
     // Cleanup
     sync.stop();
     io_context.stop();
-    if (mesh_thread.joinable())
-      mesh_thread.join();
+
+    for (auto &t : mesh_pool) {
+      if (t.joinable())
+        t.join();
+    }
 
     std::cout << "\nServer stopping gracefully..." << std::endl;
     db.flush();

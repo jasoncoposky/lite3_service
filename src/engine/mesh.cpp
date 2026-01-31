@@ -1,5 +1,7 @@
 #include "mesh.hpp"
 #include "observability.hpp"
+#include <boost/asio/bind_executor.hpp>
+#include <boost/asio/strand.hpp>
 #include <deque>
 #include <iostream>
 #include <thread>
@@ -24,30 +26,35 @@ static std::string lane_to_string(Lane l) {
 class Mesh::Connection : public std::enable_shared_from_this<Connection> {
 public:
   Connection(boost::asio::ip::tcp::socket socket, Mesh *mesh)
-      : socket_(std::move(socket)), mesh_(mesh) {}
+      : socket_(std::move(socket)), mesh_(mesh),
+        strand_(boost::asio::make_strand(
+            boost::asio::any_io_executor(mesh->io_context_.get_executor()))) {}
 
   void start(bool is_outbound, NodeID local_id) {
-    if (is_outbound) {
-      do_send_id(local_id);
-    } else {
-      do_read_id();
-    }
+    auto self(shared_from_this());
+    boost::asio::post(strand_, [this, self, is_outbound, local_id]() {
+      if (is_outbound) {
+        do_send_id(local_id);
+      } else {
+        do_read_id();
+      }
+    });
   }
 
   void on_identified(std::function<void(NodeID)> cb) { on_id_ = cb; }
 
   void do_close() {
-    boost::system::error_code
-        ec; // Changed from beast::error_code to boost::system::error_code
-    socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_send,
-                     ec); // Added boost::asio::ip::
-    socket_.close(ec);    // Ensure FD is released
+    auto self(shared_from_this());
+    boost::asio::post(strand_, [this, self]() {
+      boost::system::error_code ec;
+      socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_send, ec);
+      socket_.close(ec);
+    });
   }
 
   void send(std::vector<uint8_t> payload) {
     boost::asio::post(
-        socket_.get_executor(),
-        [self = shared_from_this(), p = std::move(payload)]() mutable {
+        strand_, [self = shared_from_this(), p = std::move(payload)]() mutable {
           bool write_in_progress = !self->outbox_.empty();
           self->outbox_.push_back(std::move(p));
           if (!write_in_progress) {
@@ -61,6 +68,7 @@ public:
 private:
   boost::asio::ip::tcp::socket socket_;
   Mesh *mesh_;
+  boost::asio::strand<boost::asio::any_io_executor> strand_;
   NodeID peer_id_ = 0;
   std::function<void(NodeID)> on_id_;
   std::vector<uint8_t> read_buffer_; // For body
@@ -73,40 +81,44 @@ private:
     handshake_id_ = my_id;
     boost::asio::async_write(
         socket_, boost::asio::buffer(&handshake_id_, 4),
-        [this, self](boost::system::error_code ec, std::size_t) {
-          if (!ec) {
-            do_read_header();
-          }
-        });
+        boost::asio::bind_executor(
+            strand_, [this, self](boost::system::error_code ec, std::size_t) {
+              if (!ec) {
+                do_read_header();
+              }
+            }));
   }
 
   void do_read_id() {
     auto self(shared_from_this());
     boost::asio::async_read(
         socket_, boost::asio::buffer(&handshake_id_, 4),
-        [this, self](boost::system::error_code ec, std::size_t) {
-          if (!ec) {
-            peer_id_ = handshake_id_;
-            if (on_id_)
-              on_id_(peer_id_);
-            do_read_header();
-          }
-        });
+        boost::asio::bind_executor(
+            strand_, [this, self](boost::system::error_code ec, std::size_t) {
+              if (!ec) {
+                peer_id_ = handshake_id_;
+                if (on_id_)
+                  on_id_(peer_id_);
+                do_read_header();
+              }
+            }));
   }
 
   void do_read_header() {
     auto self(shared_from_this());
     boost::asio::async_read(
         socket_, boost::asio::buffer(header_buffer_, sizeof(header_buffer_)),
-        [this, self](boost::system::error_code ec, std::size_t /*length*/) {
-          if (!ec) {
-            uint32_t lane = header_buffer_[0];
-            uint32_t size = header_buffer_[1];
-            do_read_body(lane, size);
-          } else {
-            // Handle close/error
-          }
-        });
+        boost::asio::bind_executor(
+            strand_,
+            [this, self](boost::system::error_code ec, std::size_t /*length*/) {
+              if (!ec) {
+                uint32_t lane = header_buffer_[0];
+                uint32_t size = header_buffer_[1];
+                do_read_body(lane, size);
+              } else {
+                // Handle close/error
+              }
+            }));
   }
 
   void do_read_body(uint32_t lane, uint32_t size) {
@@ -114,14 +126,11 @@ private:
     read_buffer_.resize(size);
     boost::asio::async_read(
         socket_, boost::asio::buffer(read_buffer_),
-        [this, self, lane, size](boost::system::error_code ec,
-                                 std::size_t /*length*/) {
+        boost::asio::bind_executor(strand_, [this, self, lane,
+                                             size](boost::system::error_code ec,
+                                                   std::size_t /*length*/) {
           if (!ec) {
-            // Dispatch to Mesh callback (TODO: Identify
-            // Peer ID? For now anonymous/based on
-            // connection) Ideally handshake first to
-            // establish ID. Assuming NodeID=0 for anonymous
-            // for now.
+            // Dispatch to Mesh callback (TODO: Identify Peer ID?)
             if (mesh_->on_message_) {
               mesh_->on_message_(0, static_cast<Lane>(lane), read_buffer_);
 #ifndef LITE3CPP_DISABLE_OBSERVABILITY
@@ -136,23 +145,25 @@ private:
           } else {
             // Error
           }
-        });
+        }));
   }
 
   void do_write() {
     auto self(shared_from_this());
     boost::asio::async_write(
         socket_, boost::asio::buffer(outbox_.front()),
-        [this, self](boost::system::error_code ec, std::size_t /*length*/) {
-          if (!ec) {
-            outbox_.pop_front();
-            if (!outbox_.empty()) {
-              do_write();
-            }
-          } else {
-            // Error
-          }
-        });
+        boost::asio::bind_executor(
+            strand_,
+            [this, self](boost::system::error_code ec, std::size_t /*length*/) {
+              if (!ec) {
+                outbox_.pop_front();
+                if (!outbox_.empty()) {
+                  do_write();
+                }
+              } else {
+                // Error
+              }
+            }));
   }
 };
 
