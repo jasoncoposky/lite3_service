@@ -265,6 +265,9 @@ constexpr char dashboard_html[] = R"HTML(<!DOCTYPE html>
         let lastMeshRx = 0;
         let lastMeshTx = 0;
         
+        let lastSetTotalLat = 0;
+        let lastSetCount = 0;
+        
         let firstRun = true;
 
         async function fetchMetrics() {
@@ -330,16 +333,31 @@ constexpr char dashboard_html[] = R"HTML(<!DOCTYPE html>
                 document.getElementById('mesh-rx-val').innerText = meshRxRate.toLocaleString();
                 document.getElementById('mesh-tx-val').innerText = meshTxRate.toLocaleString();
 
-                // Update DOM - Latency
-                const currentSetLat = (data.operations && data.operations.set) ? data.operations.set.avg_latency_s * 1000 : 0;
-                document.getElementById('latency-val').innerText = currentSetLat.toFixed(4);
+
+                // Update DOM - Latency (Instantaneous)
+                const setStats = (data.operations && data.operations.set) ? data.operations.set : { count: 0, avg_latency_s: 0 };
+                
+                // Reconstruct total latency from avg * count
+                const currentSetTotalLat = setStats.avg_latency_s * setStats.count;
+                const currentSetCount = setStats.count;
+
+                const deltaLat = firstRun ? 0 : currentSetTotalLat - lastSetTotalLat;
+                const deltaCount = firstRun ? 0 : currentSetCount - lastSetCount;
+
+                lastSetTotalLat = currentSetTotalLat;
+                lastSetCount = currentSetCount;
+
+                // If no ops in this interval, use 0 (or keep last? 0 is safer for "current")
+                const instantLatS = deltaCount > 0 ? deltaLat / deltaCount : 0;
+                const instantLatMs = instantLatS * 1000;
+
+                document.getElementById('latency-val').innerText = instantLatMs.toFixed(4);
 
                 // Update Charts
                 trafficChart.push(rxRate + txRate);
 
                 // Latency (Operations set)
-                const setLat = (data.operations && data.operations.set) ? data.operations.set.avg_latency_s * 1000 : 0;
-                latencyChart.push(setLat);
+                latencyChart.push(instantLatMs);
 
             } catch (e) {
                 console.error("Fetch failed", e);

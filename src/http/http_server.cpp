@@ -14,6 +14,7 @@
 #include <boost/beast/version.hpp>
 #include <boost/config.hpp>
 #include <chrono>
+#include <csignal>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -24,6 +25,9 @@
 #include "engine/store.hpp"
 #include "json.hpp"
 #include "observability/simple_metrics.hpp"
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
 
 namespace http_server {
 
@@ -58,10 +62,20 @@ class session : public std::enable_shared_from_this<session> {
   beast::flat_buffer buffer_;
   http::request<http::string_body> req_;
   l3kv::Engine &db_;
+  std::shared_ptr<lite3::ConsistentHash> ring_;
+  uint32_t self_node_id_;
+  std::string address_;
+  int port_;
+  const std::map<uint32_t, std::pair<std::string, int>> &peers_;
 
 public:
-  session(tcp::socket &&socket, net::io_context &ioc, l3kv::Engine &db)
-      : socket_(std::move(socket)), ioc_(ioc), db_(db) {
+  session(tcp::socket &&socket, net::io_context &ioc, l3kv::Engine &db,
+          std::shared_ptr<lite3::ConsistentHash> ring, uint32_t node_id,
+          std::string address, int port,
+          const std::map<uint32_t, std::pair<std::string, int>> &peers)
+      : socket_(std::move(socket)), ioc_(ioc), db_(db), ring_(ring),
+        self_node_id_(node_id), address_(std::move(address)), port_(port),
+        peers_(peers) {
 #ifndef LITE3CPP_DISABLE_OBSERVABILITY
     if (auto *m = lite3cpp::g_metrics.load(std::memory_order_relaxed))
       m->increment_active_connections();
@@ -206,8 +220,86 @@ private:
       return send_response(std::move(res));
     }
 
+    // Helper for Redirection
+    auto const redirect_to_owner = [&](uint32_t owner,
+                                       beast::string_view target) {
+      http::response<http::string_body> res{http::status::temporary_redirect,
+                                            req_.version()};
+      res.set(http::field::server, "Lite3");
+
+      auto it = peers_.find(owner);
+      if (it != peers_.end()) {
+        std::string location = "http://" + it->second.first + ":" +
+                               std::to_string(it->second.second) +
+                               std::string(target);
+        res.set(http::field::location, location);
+        res.body() = "Redirecting to owner node " + std::to_string(owner);
+      } else {
+        res.result(http::status::service_unavailable);
+        res.body() = "Key owned by node " + std::to_string(owner) +
+                     " but peer address unknown.";
+      }
+      res.prepare_payload();
+      return res;
+    };
+
+    // ...
+
+    // ...
+    if (req_.method() == http::verb::get && target == "/cluster/map") {
+      json j;
+      // Add self
+      json self = json::object();
+      self["id"] = self_node_id_;
+      // We don't store our own host/port in peers_ usually, but for client
+      // config it's needed. However, the client calling us KNOWS our host/port
+      // (it connected to us). But for a complete map, we ideally need our own
+      // config. Since http_server doesn't store self config (address/port
+      // passed to ctor but not stored), we might need to rely on peers_ only,
+      // OR update http_server to store self props. For MVP, returning the PEERS
+      // list is enough if the client treats the seed node as known. Actually,
+      // let's just return the peers map.
+
+      json peer_list = json::array();
+      // Add self
+      {
+        json p;
+        p["id"] = self_node_id_;
+        p["host"] = address_; // Using configured address
+        p["http_port"] = port_;
+        peer_list.push_back(p);
+      }
+
+      for (const auto &[id, info] : peers_) {
+        json p;
+        p["id"] = id;
+        p["host"] = info.first;
+        p["http_port"] = info.second;
+        peer_list.push_back(p);
+      }
+      j["peers"] = peer_list;
+      j["mode"] =
+          "sharded"; // Hardcoded for now or pass config? session has ring_
+
+      http::response<http::string_body> res{http::status::ok, req_.version()};
+      res.set(http::field::server, "Lite3");
+      res.set(http::field::content_type, "application/json");
+      res.body() = j.dump();
+      res.prepare_payload();
+      return send_response(std::move(res));
+    }
+
     if (req_.method() == http::verb::get && target.starts_with("/kv/")) {
       std::string key = target.substr(4);
+
+      // Sharding Check
+      if (ring_) {
+        uint32_t owner = ring_->get_node(key);
+        if (owner != self_node_id_ && owner != 0) {
+          return send_response(redirect_to_owner(owner, target));
+        }
+      }
+
       lite3cpp::Buffer buffer_data =
           db_.get(key);              // db.get now returns a Buffer
       if (buffer_data.size() == 0) { // Check if buffer is empty
@@ -237,6 +329,15 @@ private:
 
     if (req_.method() == http::verb::put && target.starts_with("/kv/")) {
       std::string key = target.substr(4);
+
+      // Sharding Check
+      if (ring_) {
+        uint32_t owner = ring_->get_node(key);
+        if (owner != self_node_id_ && owner != 0) {
+          return send_response(redirect_to_owner(owner, target));
+        }
+      }
+
       try {
         db_.put(key, req_.body());
         http::response<http::empty_body> res{http::status::ok, req_.version()};
@@ -254,6 +355,15 @@ private:
       if (qpos == std::string::npos)
         return send_response(bad_req("Missing params"));
       std::string key = target.substr(4, qpos - 4);
+
+      // Sharding Check
+      if (ring_) {
+        uint32_t owner = ring_->get_node(key);
+        if (owner != self_node_id_ && owner != 0) {
+          return send_response(redirect_to_owner(owner, target));
+        }
+      }
+
       auto params = parse_query(target.substr(qpos + 1));
 
       if (params["op"] == "set_int") {
@@ -276,6 +386,15 @@ private:
 
     if (req_.method() == http::verb::delete_ && target.starts_with("/kv/")) {
       std::string key = target.substr(4);
+
+      // Sharding Check
+      if (ring_) {
+        uint32_t owner = ring_->get_node(key);
+        if (owner != self_node_id_ && owner != 0) {
+          return send_response(redirect_to_owner(owner, target));
+        }
+      }
+
       if (db_.del(key)) {
         http::response<http::empty_body> res{http::status::ok, req_.version()};
         res.keep_alive(req_.keep_alive());
@@ -343,12 +462,16 @@ private:
 struct ThreadExit : std::exception {};
 
 http_server::http_server(l3kv::Engine &db, std::string address,
-                         unsigned short port, int min_threads, int max_threads)
+                         unsigned short port, int min_threads, int max_threads,
+                         std::shared_ptr<lite3::ConsistentHash> ring,
+                         uint32_t node_id,
+                         std::map<uint32_t, std::pair<std::string, int>> peers)
     : address_(std::move(address)), port_(port), ioc_(max_threads),
       signals_(ioc_, SIGINT, SIGTERM, SIGBREAK),
       acceptor_(ioc_, {net::ip::make_address(address_), port_}), db_(db),
       min_threads_(min_threads), max_threads_(max_threads),
-      manager_timer_(ioc_) {
+      manager_timer_(ioc_), ring_(ring), self_node_id_(node_id),
+      peers_(std::move(peers)) {
   n_threads_ = 1; // Main thread
   kf_.init(0.0);
   last_tick_ = std::chrono::steady_clock::now();
@@ -544,7 +667,9 @@ void http_server::on_accept(beast::error_code ec, tcp::socket socket) {
   }
 
   // Create a session and run it
-  std::make_shared<session>(std::move(socket), ioc_, db_)->run();
+  std::make_shared<session>(std::move(socket), ioc_, db_, ring_, self_node_id_,
+                            address_, port_, peers_)
+      ->run();
 
   // Accept another connection
   do_accept();

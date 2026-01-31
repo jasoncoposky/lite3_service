@@ -9,14 +9,14 @@
 #include <vector>
 
 #include <document.hpp>
-#include <lite3/client.hpp>
+#include <lite3/smart_client.hpp>
 
 // --- Configuration ---
 // Workload A: 50% Read, 50% Update
 const int READ_PERCENTAGE = 50;
 const int UPDATE_PERCENTAGE = 50;
-const int RECORD_COUNT = 10000;
-const int OPERATION_COUNT = 1000;
+int RECORD_COUNT = 10000;
+int OPERATION_COUNT = 1000;
 const int FIELD_LENGTH = 100; // 10 fields of 100 bytes = 1KB record
 const int FIELD_COUNT = 10;
 
@@ -78,15 +78,19 @@ std::vector<Host> parse_hosts(std::string arg) {
 }
 
 void load_phase(const std::vector<Host> &hosts) {
-  std::cout << "Loading " << RECORD_COUNT << " records to " << hosts.size()
-            << " hosts (Broadcast)...\n";
+  std::cout << "Loading " << RECORD_COUNT
+            << " records using SmartClient (Seed: " << hosts[0].address << ":"
+            << hosts[0].port << ")...\n";
   auto start = std::chrono::high_resolution_clock::now();
   int errors = 0;
 
-  // Create a client for each host
-  std::vector<std::unique_ptr<lite3::Client>> clients;
-  for (const auto &h : hosts) {
-    clients.push_back(std::make_unique<lite3::Client>(h.address, h.port));
+  // Use single SmartClient for loading
+  lite3::SmartClient client(hosts[0].address, hosts[0].port);
+  auto connect_res = client.connect();
+  if (!connect_res) {
+    std::cerr << "Failed to connect to cluster: " << connect_res.error().message
+              << "\n";
+    return;
   }
 
   for (int i = 0; i < RECORD_COUNT; ++i) {
@@ -95,20 +99,18 @@ void load_phase(const std::vector<Host> &hosts) {
     // Send raw bytes. Client PUT expects string.
     std::string val(reinterpret_cast<const char *>(rec.data()), rec.size());
 
-    for (auto &client : clients) {
-      auto res = client->put(key, val);
-      if (!res) {
-        errors++;
-        if (errors < 10)
-          std::cerr << "Load error: " << res.error().message << "\n";
-      }
+    auto res = client.put(key, val);
+    if (!res) {
+      errors++;
+      if (errors < 10)
+        std::cerr << "Load error: " << res.error().message << "\n";
     }
   }
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> diff = end - start;
   std::cout << "Load Complete: " << diff.count() << "s ("
-            << (RECORD_COUNT * hosts.size()) / diff.count()
-            << " ops/sec). Errors: " << errors << "\n";
+            << RECORD_COUNT / diff.count() << " ops/sec). Errors: " << errors
+            << "\n";
 }
 
 struct ThreadResult {
@@ -121,7 +123,13 @@ void run_worker(int thread_id, int ops_per_thread, ThreadResult &result,
                 const std::vector<Host> &hosts) {
   try {
     const auto &host = hosts[thread_id % hosts.size()];
-    lite3::Client client(host.address, host.port);
+    lite3::SmartClient client(host.address, host.port);
+    if (auto res = client.connect(); !res) {
+      std::cerr << "Worker " << thread_id
+                << " failed to connect: " << res.error().message << "\n";
+      result.errors += ops_per_thread; // Mark all as failed
+      return;
+    }
 
     std::mt19937 generator(12345 + thread_id); // Unique seed per thread
     std::uniform_int_distribution<int> key_dist(0, RECORD_COUNT - 1);
@@ -228,6 +236,10 @@ int main(int argc, char **argv) {
     std::string arg = argv[i];
     if (arg == "--threads" && i + 1 < argc) {
       threads = std::stoi(argv[++i]);
+    } else if (arg == "--ops" && i + 1 < argc) {
+      OPERATION_COUNT = std::stoi(argv[++i]);
+    } else if (arg == "--records" && i + 1 < argc) {
+      RECORD_COUNT = std::stoi(argv[++i]);
     } else if (arg == "--skip-load") {
       skip_load = true;
     } else if (arg == "--hosts" && i + 1 < argc) {

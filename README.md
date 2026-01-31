@@ -96,48 +96,58 @@ cmake --build . --config Release --target l3svc
 ```
 Ensure `config.json` is present in the working directory or provide a path.
 
-#### Configuration (`config.json`)
+### Configuration (`config.json`)
 ```json
 {
-  "server": {
-    "address": "0.0.0.0",        // Bind address (0.0.0.0 for all interfaces)
-    "port": 8080,                // HTTP API port
-    "min_threads": 4,            // Minimum threads in the predictive pool
-    "max_threads": 16            // Maximum threads (auto-scaled via Kalman Filter)
+  "address": "127.0.0.1",
+  "port": 8080,
+  "node_id": 1,
+  "peers": [
+      { "id": 2, "host": "127.0.0.1", "mesh_port": 9091, "http_port": 8081 },
+      { "id": 3, "host": "127.0.0.1", "mesh_port": 9092, "http_port": 8082 }
+  ],
+  "cluster": {
+      "mode": "sharded",       // "sharded" or "standalone"
+      "shards": 100            // Number of virtual nodes for Consistent Hashing
   },
-  "storage": {
-    "wal_path": "data.wal"       // Path to the Write-Ahead Log file
-  },
-  "replication": {
-    "node_id": 1,                // Unique ID for this node (1-255)
-    "peers": ["127.0.0.1:9001"]  // List of peer addresses (Host:Port) for gossip
-  }
+  "min_threads": 4,
+  "max_threads": 16,
+  "wal_path": "node1.wal"
 }
 ```
 
-| Section | Key | Description |
-| :--- | :--- | :--- |
-| **Server** | `address` | Network interface to bind HTTP server to. |
-| | `port` | Port for REST API and Dashboard. |
-| | `max_threads` | Ceiling for the auto-scaling thread pool. L3KV scales threads based on CPU load prediction. |
-| **Storage** | `wal_path` | Location of the Append-Only Log. Defines durability guarantees. |
-| **Replication** | `node_id` | **Critical**: Must be unique per node to prevent Logical Clock collisions. |
-| | `peers` | Initial list of neighbors for the Mesh. Nodes will strictly gossip with these peers. |
+## 🌐 Sharded Clustering
 
-The service listens on port `8080` (or as configured).
+L3KV supports horizontal scaling via **Consistent Hashing**.
+
+*   **Topology Awareness:** The cluster map is served at `/cluster/map`.
+*   **Smart Clients:** Clients (like `liblite3client`) automatically download the topology and route requests directly to the owner node, achieving **O(1)** routing latency.
+*   **Redirection:** If a legacy client hits the wrong node, it receives a `307 Temporary Redirect` to the correct owner.
+
+### Running a Cluster (3-Node Example)
+
+1.  **Start the Cluster:**
+    ```powershell
+    .\start_cluster.ps1
+    ```
+    This launches 3 instances of `l3svc` on ports 8080/9090, 8081/9091, and 8082/9092.
+
+2.  **Run Smart Client Benchmark:**
+    ```powershell
+    .\build\Release\bench_ycsb.exe --threads 16 --ops 100000 --hosts 127.0.0.1:8080,127.0.0.1:8081,127.0.0.1:8082
+    ```
 
 ## 🔌 API Reference
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/kv/{key}` | Retrieve document as JSON. |
+| `GET` | `/kv/{key}` | Retrieve document as JSON (or redirect if sharded). |
 | `PUT` | `/kv/{key}` | Store JSON document. |
 | `DELETE` | `/kv/{key}` | Delete document. |
 | `POST` | `/kv/{key}?op=set_int&field={path}&val={v}` | fast-path integer update. |
-| `GET` | `/metrics` | Real-time JSON metrics (System + Replication). |
-| `GET` | `/dashboard` | Visual Dashboard (Replication + Stats). |
-| `GET` | `/kv/health` | Health check (returns 200 OK). |
-| `GET` | `/kv/metrics` | (Deprecated) Legacy metrics text. |
+| `GET` | `/cluster/map` | JSON map of cluster topology (nodes, shards). |
+| `GET` | `/metrics` | Real-time JSON metrics. |
+| `GET` | `/dashboard` | Visual Dashboard. |
 
 
 ## ⚡ Performance Metrics

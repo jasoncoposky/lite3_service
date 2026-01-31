@@ -13,15 +13,28 @@
 #include "http/http_server.hpp"
 #include "observability/simple_metrics.hpp"
 #include <iostream>
+#include <lite3/ring.hpp>
 
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <map>
 #include <string>
 #include <string_view>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+using json = nlohmann::json;
 
 // Global metrics instance to be accessible from signal handler
 SimpleMetrics global_metrics;
+
+struct PeerConfig {
+  uint32_t id;
+  std::string host;
+  int mesh_port;
+  int http_port;
+};
 
 struct Config {
   std::string address = "0.0.0.0";
@@ -31,53 +44,10 @@ struct Config {
   std::string wal_path = "data.wal";
   uint32_t node_id = 1;
   int mesh_port = 9090;
-  std::string peers = ""; // Format: "id:host:port,id:host:port"
+  std::vector<PeerConfig> peers;
+  std::string cluster_mode = "replicated"; // "replicated" or "sharded"
+  int num_shards = 1;
 };
-
-// Simple manual JSON parser for flat config
-// Avoids heavy dependencies and macro conflicts
-std::string extract_string(const std::string &content, const std::string &key) {
-  auto pos = content.find("\"" + key + "\"");
-  if (pos == std::string::npos)
-    return "";
-  pos = content.find(":", pos);
-  if (pos == std::string::npos)
-    return "";
-  auto start = content.find("\"", pos + 1);
-  if (start == std::string::npos)
-    return "";
-  auto end = content.find("\"", start + 1);
-  if (end == std::string::npos)
-    return "";
-  return content.substr(start + 1, end - start - 1);
-}
-
-int extract_int(const std::string &content, const std::string &key,
-                int default_val) {
-  auto pos = content.find("\"" + key + "\"");
-  if (pos == std::string::npos)
-    return default_val;
-  pos = content.find(":", pos);
-  if (pos == std::string::npos)
-    return default_val;
-  // Skip whitespace and potentially quote if numbers are quoted
-  size_t val_start = pos + 1;
-  while (val_start < content.size() &&
-         (isspace(content[val_start]) || content[val_start] == '\"'))
-    val_start++;
-  size_t val_end = val_start;
-  while (val_end < content.size() &&
-         (isdigit(content[val_end]) || content[val_end] == '-'))
-    val_end++;
-
-  if (val_start >= val_end)
-    return default_val;
-  try {
-    return std::stoi(content.substr(val_start, val_end - val_start));
-  } catch (...) {
-    return default_val;
-  }
-}
 
 Config load_config(const std::string &path) {
   Config cfg;
@@ -88,40 +58,55 @@ Config load_config(const std::string &path) {
                 << std::endl;
       return cfg;
     }
-    std::string content((std::istreambuf_iterator<char>(f)),
-                        std::istreambuf_iterator<char>());
 
-    std::string addr = extract_string(content, "address");
-    if (!addr.empty())
-      cfg.address = addr;
+    json j;
+    f >> j;
 
-    int port = extract_int(content, "port", -1);
-    if (port != -1)
-      cfg.port = (unsigned short)port;
+    cfg.address = j.value("address", cfg.address);
+    cfg.port = j.value("port", cfg.port);
+    cfg.min_threads = j.value("min_threads", cfg.min_threads);
+    cfg.max_threads = j.value("max_threads", cfg.max_threads);
+    cfg.wal_path = j.value("wal_path", cfg.wal_path);
+    cfg.node_id = j.value("node_id", cfg.node_id);
+    cfg.mesh_port = j.value("mesh_port", cfg.mesh_port);
 
-    int min_t = extract_int(content, "min_threads", -1);
-    if (min_t != -1)
-      cfg.min_threads = min_t;
+    if (j.contains("cluster")) {
+      auto &c = j["cluster"];
+      cfg.cluster_mode = c.value("mode", cfg.cluster_mode);
+      cfg.num_shards = c.value("shards", cfg.num_shards);
 
-    int max_t = extract_int(content, "max_threads", -1);
-    if (max_t != -1)
-      cfg.max_threads = max_t;
-
-    std::string wal = extract_string(content, "wal_path");
-    if (!wal.empty())
-      cfg.wal_path = wal;
-
-    int nid = extract_int(content, "node_id", -1);
-    if (nid != -1)
-      cfg.node_id = (uint32_t)nid;
-
-    int mp = extract_int(content, "mesh_port", -1);
-    if (mp != -1)
-      cfg.mesh_port = mp;
-
-    std::string peers = extract_string(content, "peers");
-    if (!peers.empty())
-      cfg.peers = peers;
+      if (c.contains("peers")) {
+        auto &p_node = c["peers"];
+        // Handle array format
+        if (p_node.is_array()) {
+          for (auto &p : p_node) {
+            PeerConfig pc;
+            pc.id = p.value("id", 0u);
+            pc.host = p.value("host", "127.0.0.1");
+            pc.mesh_port = p.value("mesh_port", 9090);
+            pc.http_port = p.value("http_port", 8080);
+            if (pc.id != 0) {
+              cfg.peers.push_back(pc);
+            }
+          }
+        }
+        // Fallback for legacy string format? No, user explicitly asked to use
+        // keys.
+      }
+    }
+    // Also check root "peers" if not found in cluster?
+    if (cfg.peers.empty() && j.contains("peers") && j["peers"].is_array()) {
+      for (auto &p : j["peers"]) {
+        PeerConfig pc;
+        pc.id = p.value("id", 0u);
+        pc.host = p.value("host", "127.0.0.1");
+        pc.mesh_port = p.value("mesh_port", 9090);
+        pc.http_port = p.value("http_port", 8080);
+        if (pc.id != 0) {
+          cfg.peers.push_back(pc);
+        }
+      }
+    }
 
     std::cout << "Loaded config from " << path << std::endl;
   } catch (const std::exception &e) {
@@ -179,39 +164,22 @@ int main(int argc, char *argv[]) {
       }
     });
 
-    // Parse and connect to peers
-    if (!cfg.peers.empty()) {
-      std::string s = cfg.peers;
-      std::cout << "DEBUG: Parsing peers: " << s << std::endl;
-      size_t pos = 0;
-      while ((pos = s.find_first_not_of(",")) != std::string::npos) {
-        s.erase(0, pos);
-        size_t end = s.find(",");
-        std::string peer_str = s.substr(0, end);
-        if (end != std::string::npos)
-          s.erase(0, end + 1);
-        else
-          s.clear();
+    // Map of peers for HTTP redirection: ID -> {Host, HTTP_Port}
+    std::map<uint32_t, std::pair<std::string, int>> http_peers;
 
-        // format: id:host:port
-        size_t c1 = peer_str.find(":");
-        if (c1 != std::string::npos) {
-          uint32_t pid = std::stoul(peer_str.substr(0, c1));
-          size_t c2 = peer_str.find(":", c1 + 1);
-          if (c2 != std::string::npos) {
-            std::string host = peer_str.substr(c1 + 1, c2 - c1 - 1);
-            int pport = std::stoi(peer_str.substr(c2 + 1));
-            std::cout << "Connecting to peer " << pid << " at " << host << ":"
-                      << pport << std::endl;
-            try {
-              mesh.connect(pid, host, pport);
-            } catch (const std::exception &e) {
-              std::cerr << "Failed to connect to peer " << pid << ": "
-                        << e.what() << " (will wait for them to connect to us)"
-                        << std::endl;
-            }
-          }
-        }
+    // Connect to peers and populate map
+    for (const auto &peer : cfg.peers) {
+      std::cout << "Connecting to peer " << peer.id << " at " << peer.host
+                << ":" << peer.mesh_port << " (HTTP: " << peer.http_port << ")"
+                << std::endl;
+
+      http_peers[peer.id] = {peer.host, peer.http_port};
+
+      try {
+        mesh.connect(peer.id, peer.host, peer.mesh_port);
+      } catch (const std::exception &e) {
+        std::cerr << "Failed to connect to peer " << peer.id << ": " << e.what()
+                  << " (will wait for them to connect to us)" << std::endl;
       }
     }
 
@@ -219,10 +187,27 @@ int main(int argc, char *argv[]) {
     sync.start();
     std::cout << "DEBUG: SyncManager started." << std::endl;
 
+    // Build Consistent Hash Ring
+    std::shared_ptr<lite3::ConsistentHash> ring; // Updated namespace
+    if (cfg.cluster_mode == "sharded") {
+      ring = std::make_shared<lite3::ConsistentHash>();
+      ring->add_node(cfg.node_id); // Add self
+
+      // Add peers to ring
+      for (const auto &peer : cfg.peers) {
+        ring->add_node(peer.id);
+      }
+      std::cout << "Cluster Mode: SHARDED. Ring Size: " << ring->size()
+                << " vnodes." << std::endl;
+    } else {
+      std::cout << "Cluster Mode: REPLICATED (Geo/Local)." << std::endl;
+    }
+
     // Start HTTP Server
     std::cout << "DEBUG: Starting HTTP Server..." << std::endl;
     http_server::http_server server(db, cfg.address, cfg.port, cfg.min_threads,
-                                    cfg.max_threads);
+                                    cfg.max_threads, ring, cfg.node_id,
+                                    http_peers);
     std::cout << "Lite3 Service listening on :" << cfg.port << std::endl;
     server.run();
 

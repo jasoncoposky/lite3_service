@@ -6,5 +6,22 @@
     "wal_path": "node3.wal",
     "node_id": 3,
     "mesh_port": 9092,
-    "peers": "1:127.0.0.1:9090,2:127.0.0.1:9091"
+    "peers": [
+        {
+            "id": 1,
+            "host": "127.0.0.1",
+            "mesh_port": 9090,
+            "http_port": 8080
+        },
+        {
+            "id": 2,
+            "host": "127.0.0.1",
+            "mesh_port": 9091,
+            "http_port": 8081
+        }
+    ],
+    "cluster": {
+        "mode": "sharded",
+        "shards": 100
+    }
 }
